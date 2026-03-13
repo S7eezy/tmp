@@ -1,0 +1,78 @@
+services:
+
+  # ── Elasticsearch ──────────────────────────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION}
+    container_name: ft-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - cluster.name=${ELASTIC_CLUSTER_NAME}
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - xpack.security.enabled=${ELASTIC_SECURITY_ENABLED}
+      - xpack.security.http.ssl.enabled=false
+      - "ES_JAVA_OPTS=-Xms${ELASTIC_MEM_LIMIT} -Xmx${ELASTIC_MEM_LIMIT}"
+    ports:
+      - "${ELASTIC_PORT}:9200"
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ft-net
+
+  # ── GeoServer ──────────────────────────────────────
+  geoserver:
+    image: kartoza/geoserver:${GEOSERVER_VERSION}
+    container_name: ft-geoserver
+    environment:
+      - GEOSERVER_ADMIN_USER=${GEOSERVER_ADMIN_USER}
+      - GEOSERVER_ADMIN_PASSWORD=${GEOSERVER_ADMIN_PASSWORD}
+      - INITIAL_MEMORY=${GEOSERVER_MEM_XMS}
+      - MAXIMUM_MEMORY=${GEOSERVER_MEM_XMX}
+      - GEOSERVER_DATA_DIR=${GEOSERVER_DATA_DIR}
+      - CORS_ENABLED=${GEOSERVER_CORS_ENABLED}
+    ports:
+      - "${GEOSERVER_PORT}:8080"
+    volumes:
+      - geoserver-data:${GEOSERVER_DATA_DIR}
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/geoserver/web/ || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+    networks:
+      - ft-net
+
+  # ── Frontend (Vite dev server) ─────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ft-frontend
+    ports:
+      - "${FRONTEND_PORT}:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_ES_URL=http://elasticsearch:9200
+      - VITE_GEOSERVER_URL=http://geoserver:8080/geoserver
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    networks:
+      - ft-net
+
+volumes:
+  es-data:
+  geoserver-data:
+
+networks:
+  ft-net:
+    driver: bridge
