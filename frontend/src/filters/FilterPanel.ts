@@ -121,6 +121,7 @@ export interface FilterPanelOptions {
   getIndexes: () => string[];
   getFeatures: (id: string) => Feature[];
   onStartDrawPolygon?: () => void;
+  onStartDrawBbox?: () => void;
 }
 
 export class FilterPanel {
@@ -129,6 +130,7 @@ export class FilterPanel {
   private _getIndexes: () => string[];
   private _getFeatures: (id: string) => Feature[];
   private _onStartDrawPolygon?: () => void;
+  private _onStartDrawBbox?: () => void;
 
   private _form: FormState;
   private _fieldCache = new Map<string, FieldInfo[]>();
@@ -141,12 +143,23 @@ export class FilterPanel {
     this._getIndexes = opts.getIndexes;
     this._getFeatures = opts.getFeatures;
     this._onStartDrawPolygon = opts.onStartDrawPolygon;
+    this._onStartDrawBbox    = opts.onStartDrawBbox;
     this._form = defaultForm(opts.getIndexes());
   }
 
   setPolygonPoints(points: Array<[number, number]>): void {
     this._form.polygonPoints = points;
     if (this._form.step === 'geo' && this._form.geoMode === 'polygon') {
+      this.render();
+    }
+  }
+
+  setBboxPoints(a: [number, number], b: [number, number]): void {
+    this._form.bboxNorth = String(Math.max(a[1], b[1]).toFixed(6));
+    this._form.bboxSouth = String(Math.min(a[1], b[1]).toFixed(6));
+    this._form.bboxWest  = String(Math.min(a[0], b[0]).toFixed(6));
+    this._form.bboxEast  = String(Math.max(a[0], b[0]).toFixed(6));
+    if (this._form.step === 'geo' && this._form.geoMode === 'bbox') {
       this.render();
     }
   }
@@ -454,6 +467,20 @@ export class FilterPanel {
     root.appendChild(modeBar);
 
     if (this._form.geoMode === 'bbox') {
+      const drawArea = _el('div', { class: 'fp-draw-area' });
+      const drawBtn = _el('button', { class: 'fp-btn fp-btn--primary', style: 'width:100%' });
+      drawBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14" style="display:inline;vertical-align:middle;margin-right:6px"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/></svg> Draw on map`;
+      drawBtn.addEventListener('click', () => { if (this._onStartDrawBbox) this._onStartDrawBbox(); });
+      drawArea.appendChild(drawBtn);
+      const bboxSet = this._form.bboxNorth !== '' && this._form.bboxSouth !== '' &&
+                      this._form.bboxWest  !== '' && this._form.bboxEast  !== '';
+      drawArea.appendChild(_el('div', { class: 'fp-hint' },
+        bboxSet
+          ? `N ${parseFloat(this._form.bboxNorth).toFixed(4)}° · S ${parseFloat(this._form.bboxSouth).toFixed(4)}° · W ${parseFloat(this._form.bboxWest).toFixed(4)}° · E ${parseFloat(this._form.bboxEast).toFixed(4)}°`
+          : 'Click two opposite corners on the map.',
+      ));
+      root.appendChild(drawArea);
+
       const grid = _el('div', { class: 'fp-bbox-grid' });
       grid.appendChild(this._makeLabeledInput('North °', 'bbox-north', 'number', this._form.bboxNorth, '-90', '90'));
       grid.appendChild(this._makeLabeledInput('South °', 'bbox-south', 'number', this._form.bboxSouth, '-90', '90'));

@@ -1,7 +1,18 @@
-import { defineConfig } from 'vite';
+import { defineConfig, loadEnv } from 'vite';
 import { resolve } from 'path';
 
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  // Load all .env variables (no prefix filter) so server-side proxy targets
+  // can be overridden without the VITE_ prefix restriction.
+  const env = loadEnv(mode, resolve(__dirname, '..'), '');
+
+  // In Docker Compose the container environment sets these to the service names.
+  // For frontend-only dev (npm run dev outside Docker) set them in .env to
+  // the locally reachable addresses (e.g. http://localhost:9200).
+  const esTarget = env.VITE_ES_URL ?? 'http://elasticsearch:9200';
+  const geoserverTarget = env.VITE_GEOSERVER_URL ?? 'http://geoserver:8080/geoserver';
+
+  return {
   resolve: {
     alias: {
       '@core': resolve(__dirname, 'src/core'),
@@ -14,12 +25,12 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api/es': {
-        target: 'http://elasticsearch:9200',
+        target: esTarget,
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/es/, ''),
       },
       '/api/geoserver': {
-        target: 'http://geoserver:8080/geoserver',
+        target: geoserverTarget,
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/geoserver/, ''),
       },
@@ -45,4 +56,5 @@ export default defineConfig({
   worker: {
     format: 'es',
   },
+  };
 });

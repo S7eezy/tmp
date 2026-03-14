@@ -194,7 +194,8 @@ async function boot(): Promise<void> {
     engine: filterEngine,
     getIndexes: () => dataStore.allSourceIds(),
     getFeatures: (id) => rawData.get(id) ?? [],
-    onStartDrawPolygon: () => drawMode.start(),
+    onStartDrawPolygon: () => drawMode.start('polygon'),
+    onStartDrawBbox:    () => drawMode.start('bbox'),
   });
   filterPanel.render();
 

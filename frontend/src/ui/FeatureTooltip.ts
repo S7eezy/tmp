@@ -34,6 +34,9 @@ export class FeatureTooltip {
 
   setup(): void {
     this._engine.map.getCanvas().addEventListener('click', (e: MouseEvent) => {
+      // Don't interfere with polygon draw mode
+      if (document.body.classList.contains('draw-mode')) return;
+
       if ((e.target as HTMLElement).closest(
         '.side-panel, .filter-panel, .search-panel, .toolbar, .settings-overlay',
       )) return;
@@ -44,6 +47,10 @@ export class FeatureTooltip {
       let bestFeature: Feature | null = null;
       let bestSourceId = '';
       let bestDist = Infinity;
+
+      // Budget of segment projections to prevent O(n×segments) freezes on
+      // large line datasets (cables, pipelines, etc.).
+      let segmentBudget = 5_000;
 
       for (const sourceId of this._dataStore.allSourceIds()) {
         const features = this._dataStore.get(sourceId);
@@ -74,13 +81,25 @@ export class FeatureTooltip {
               }
             }
           } else if (f.geometry.type === 'LineString' || f.geometry.type === 'MultiLineString') {
-            // Flatten to a list of coordinate arrays and test screen-space distance to each segment
+            if (segmentBudget <= 0) continue;
+
+            // Coarse rejection: project first vertex; skip feature if clearly off-screen
+            const firstCoord = f.geometry.type === 'LineString'
+              ? (f.geometry.coordinates as [number, number][])[0]
+              : (f.geometry.coordinates as [number, number][][])[0]?.[0];
+            if (firstCoord) {
+              const rough = this._engine.map.project(firstCoord);
+              if (Math.abs(rough.x - point.x) > 500 || Math.abs(rough.y - point.y) > 500) continue;
+            }
+
+            // Full segment-level check within the budget
             const lines: [number, number][][] =
               f.geometry.type === 'LineString'
                 ? [f.geometry.coordinates as [number, number][]]
                 : f.geometry.coordinates as [number, number][][];
-            for (const line of lines) {
+            outer: for (const line of lines) {
               for (let j = 0; j < line.length - 1; j++) {
+                if (--segmentBudget <= 0) break outer;
                 const a = this._engine.map.project(line[j]);
                 const b = this._engine.map.project(line[j + 1]);
                 const dist = distToSegment(point, a, b);

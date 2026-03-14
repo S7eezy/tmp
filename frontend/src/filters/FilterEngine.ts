@@ -157,11 +157,19 @@ export class FilterEngine extends EventTarget {
 
   private _geoClause(f: GeoFilter): Record<string, unknown> {
     if (f.mode === 'bbox' && f.bbox) {
+      // geo_shape with Envelope works on both geo_point and geo_shape fields;
+      // geo_bounding_box only works on geo_point.
       return {
-        geo_bounding_box: {
+        geo_shape: {
           [f.geoField]: {
-            top_left:     { lat: f.bbox.north, lon: f.bbox.west },
-            bottom_right: { lat: f.bbox.south, lon: f.bbox.east },
+            shape: {
+              type: 'Envelope',
+              coordinates: [
+                [f.bbox.west, f.bbox.north],
+                [f.bbox.east, f.bbox.south],
+              ],
+            },
+            relation: 'intersects',
           },
         },
       };
@@ -175,7 +183,7 @@ export class FilterEngine extends EventTarget {
         geo_shape: {
           [f.geoField]: {
             shape: { type: 'Polygon', coordinates: [ring] },
-            relation: 'within',
+            relation: 'intersects',
           },
         },
       };

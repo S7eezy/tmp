@@ -16,7 +16,7 @@ import { PathLayer } from '@deck.gl/layers';
 import { PolygonLayer } from '@deck.gl/layers';
 import { DataFilterExtension } from '@deck.gl/extensions';
 import type { Layer as DeckGLLayer } from '@deck.gl/core';
-import type { Feature, Point, LineString, Polygon } from 'geojson';
+import type { Feature, Point, MultiLineString, Polygon } from 'geojson';
 
 import type { BaseLayer, LayerMeta } from './BaseLayer';
 import { Config } from '../../config';
@@ -25,9 +25,14 @@ import { Config } from '../../config';
 // Geometry discriminators
 // ---------------------------------------------------------------------------
 
-type PointFeature = Feature<Point>;
-type LineFeature = Feature<LineString>;
+type PointFeature   = Feature<Point>;
 type PolygonFeature = Feature<Polygon>;
+
+/** One flattened sub-path datum used by PathLayer. */
+interface PathDatum {
+  path: [number, number][];
+  source: Feature;
+}
 
 export type GeoType = 'point' | 'line' | 'polygon';
 
@@ -212,17 +217,31 @@ export class DeckLayerAdapter implements BaseLayer {
 
   private _buildPath(_binary: boolean): DeckGLLayer {
     const extensions = [new DataFilterExtension({ filterSize: 1 })];
+
+    // PathLayer expects one path per datum.
+    // Flatten MultiLineString features into individual PathDatum entries.
+    const data: PathDatum[] = [];
+    for (const f of this._data) {
+      if (f.geometry.type === 'LineString') {
+        data.push({ path: f.geometry.coordinates as [number, number][], source: f });
+      } else if (f.geometry.type === 'MultiLineString') {
+        for (const line of (f.geometry as MultiLineString).coordinates) {
+          data.push({ path: line as [number, number][], source: f });
+        }
+      }
+    }
+
     return new PathLayer({
       id: this.meta.id,
-      data: this._data,
-      getPath: (d: LineFeature) => d.geometry.coordinates as [number, number][],
+      data,
+      getPath: (d: PathDatum) => d.path,
       getColor: this.color,
       widthMinPixels: Config.path.widthMinPixels,
       widthMaxPixels: Config.path.widthMaxPixels,
       opacity: this.meta.opacity,
       pickable: Config.path.pickable,
       extensions,
-      getFilterValue: this._getFilterValue,
+      getFilterValue: (d: PathDatum) => this._getFilterValue(d.source),
       filterRange: this._filterRange,
       updateTriggers: {
         getFilterValue: [this._filterRange],
