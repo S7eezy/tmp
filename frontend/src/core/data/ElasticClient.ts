@@ -26,6 +26,8 @@ export interface EsSearchOptions {
   size?: number;
   sort?: Record<string, unknown>[];
   _source?: string[];
+  /** Optional AbortSignal to cancel the request. */
+  signal?: AbortSignal;
 }
 
 export interface EsHit {
@@ -62,7 +64,7 @@ export class ElasticClient {
   // -- Raw search ---------------------------------------------------------
 
   async search(opts: EsSearchOptions): Promise<EsSearchResponse> {
-    const { index, query, size = Config.esMaxHits, sort, _source } = opts;
+    const { index, query, size = Config.esMaxHits, sort, _source, signal } = opts;
 
     const body: Record<string, unknown> = {
       size,
@@ -75,6 +77,7 @@ export class ElasticClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal,
     });
 
     if (!res.ok) {
@@ -127,7 +130,7 @@ export class ElasticClient {
       }
 
       // Strip the geo field from properties to avoid duplication.
-      const props: GeoJsonProperties = { _id: hit._id };
+      const props: GeoJsonProperties = { _id: hit._id, _index: hit._index };
       for (const [k, v] of Object.entries(src)) {
         if (k !== geoField) props[k] = v as string | number | boolean | null;
       }
@@ -195,8 +198,8 @@ export class ElasticClient {
    * Inspect the mapping of an index and return the names of all
    * geo_point / geo_shape fields (used to auto-detect the geo field).
    */
-  async detectGeoFields(index: string): Promise<string[]> {
-    const mapping = await this.getMapping(index);
+  async detectGeoFields(index: string, signal?: AbortSignal): Promise<string[]> {
+    const mapping = await this.getMapping(index, signal);
     const geoFields: string[] = [];
     for (const [field, meta] of Object.entries(mapping)) {
       if (meta.type === 'geo_point' || meta.type === 'geo_shape') {
@@ -215,10 +218,18 @@ export class ElasticClient {
   async detectGeoType(index: string, geoField: string): Promise<'point' | 'line' | 'polygon' | null> {
     const features = await this.searchAsGeoJSON({ index, geoField, size: 10 });
     if (features.length === 0) return null;
-    const t = features[0].geometry.type;
-    if (t === 'Point' || t === 'MultiPoint') return 'point';
-    if (t === 'LineString' || t === 'MultiLineString') return 'line';
-    if (t === 'Polygon' || t === 'MultiPolygon') return 'polygon';
+
+    // Tally geometry types across the whole sample and return the dominant one.
+    const tally = new Map<string, number>();
+    for (const f of features) {
+      const t = f.geometry.type;
+      tally.set(t, (tally.get(t) ?? 0) + 1);
+    }
+    const dominant = [...tally.entries()].sort((a, b) => b[1] - a[1])[0][0];
+
+    if (dominant === 'Point' || dominant === 'MultiPoint') return 'point';
+    if (dominant === 'LineString' || dominant === 'MultiLineString') return 'line';
+    if (dominant === 'Polygon' || dominant === 'MultiPolygon') return 'polygon';
     return null;
   }
 
@@ -226,8 +237,9 @@ export class ElasticClient {
 
   async getMapping(
     index: string,
+    signal?: AbortSignal,
   ): Promise<Record<string, { type: string; fields?: Record<string, unknown> }>> {
-    const res = await fetch(`${this._base}/${index}/_mapping`);
+    const res = await fetch(`${this._base}/${index}/_mapping`, { signal });
     if (!res.ok) throw new Error(`ES mapping failed: ${res.status}`);
     const json = await res.json();
     const firstIndex = Object.keys(json)[0];

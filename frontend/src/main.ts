@@ -17,6 +17,19 @@ import { Toolbar, SidePanel, SettingsModal, FeatureTooltip, DrawMode, SearchPane
 import type { Feature } from 'geojson';
 
 // ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
+/** Delays `fn` until `ms` ms after the last call. */
+function debounce<F extends (...args: Parameters<F>) => void>(fn: F, ms: number): F {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return ((...args: Parameters<F>) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  }) as F;
+}
+
+// ---------------------------------------------------------------------------
 // Palette for auto-generated layers
 // ---------------------------------------------------------------------------
 
@@ -37,9 +50,11 @@ const PALETTE: [number, number, number, number][] = [
 
 async function boot(): Promise<void> {
   // ── 1. Core singletons ──────────────────────────────────────────────────
-  const dataStore     = new DataStore();
-  const rawData       = new Map<string, Feature[]>();
-  const layerRegistry = new LayerRegistry();
+  const dataStore       = new DataStore();
+  const rawData         = new Map<string, Feature[]>();
+  /** Geo field names per index — populated at boot, reused by the filter handler. */
+  const geoFieldsCache  = new Map<string, string[]>();
+  const layerRegistry   = new LayerRegistry();
   const filterEngine  = new FilterEngine();
   const esClient      = new ElasticClient();
 
@@ -59,13 +74,14 @@ async function boot(): Promise<void> {
   }
 
   // ── 4. For each index, detect geo field → load data → create layer ─────
+  // All indices are loaded concurrently; color is assigned by stable list position.
   const t0 = performance.now();
-  let colorIdx = 0;
 
-  for (const info of indices) {
+  await Promise.all(indices.map(async (info, colorIdx) => {
     try {
-      // Detect geo fields in this index
+      // Detect geo fields in this index and cache them for the filter handler
       const geoFields = await esClient.detectGeoFields(info.index);
+      geoFieldsCache.set(info.index, geoFields);
       if (geoFields.length === 0) {
         console.log(`[FleetTracker] Index "${info.index}" has no geo fields – skipping layer, but listing in Data panel.`);
         // Still load a sample for the data panel / filters
@@ -77,7 +93,7 @@ async function boot(): Promise<void> {
         }));
         rawData.set(info.index, features);
         dataStore.set(info.index, features);
-        continue;
+        return;
       }
 
       const geoField = geoFields[0]; // Use the first geo field
@@ -96,8 +112,6 @@ async function boot(): Promise<void> {
 
       // Create a deck.gl layer
       const color = PALETTE[colorIdx % PALETTE.length];
-      colorIdx++;
-
       const zIndex = geoType === 'point' ? 10 : geoType === 'line' ? 5 : 1;
       const layer = new DeckLayerAdapter({
         id: info.index,
@@ -112,7 +126,7 @@ async function boot(): Promise<void> {
     } catch (err) {
       console.error(`[FleetTracker] Failed to load index "${info.index}":`, err);
     }
-  }
+  }));
 
   console.log(`[FleetTracker] Loaded ${dataStore.totalFeatures()} features from ${indices.length} indices in ${(performance.now() - t0).toFixed(1)}ms`);
 
@@ -185,11 +199,20 @@ async function boot(): Promise<void> {
   filterPanel.render();
 
   // ── 11. React to filter changes → query ES ─────────────────────────────
-  filterEngine.addEventListener('change', async () => {
-    for (const [sourceId, originalFeatures] of rawData) {
-      const query = filterEngine.buildQuery(sourceId);
+  //
+  // Debounced so rapid toggles only fire one ES round-trip.
+  // AbortController cancels any in-flight requests from the previous event.
+  let _filterAbort: AbortController | null = null;
 
-      // Check if there are active filters for this index
+  const applyFilters = debounce(async () => {
+    // Cancel previous in-flight batch
+    _filterAbort?.abort();
+    _filterAbort = new AbortController();
+    const { signal } = _filterAbort;
+
+    for (const [sourceId, originalFeatures] of rawData) {
+      if (signal.aborted) break;
+
       const activeFilters = filterEngine.getFiltersForIndex(sourceId);
 
       if (activeFilters.length === 0) {
@@ -198,25 +221,35 @@ async function boot(): Promise<void> {
       } else {
         // Has filters → try ES query, fall back to client-side
         try {
-          // Detect the geo field for this index
-          const geoFields = await esClient.detectGeoFields(sourceId);
+          // Use cached mapping from boot; fall back to live fetch only for
+          // indices that appeared after startup (edge case).
+          const geoFields = geoFieldsCache.get(sourceId)
+            ?? await esClient.detectGeoFields(sourceId, signal);
+          if (signal.aborted) break;
+
           const geoField = geoFields.length > 0 ? geoFields[0] : 'location';
+          const query = filterEngine.buildQuery(sourceId);
 
           const filtered = await esClient.searchAsGeoJSON({
             index: sourceId,
             query,
             geoField,
+            signal,
           });
-          dataStore.set(sourceId, filtered);
-        } catch {
+          if (!signal.aborted) dataStore.set(sourceId, filtered);
+        } catch (err) {
+          if ((err as Error).name === 'AbortError') break;
           // Fallback to client-side filtering
           const pred = filterEngine.buildClientPredicate(sourceId);
           dataStore.set(sourceId, originalFeatures.filter(pred));
         }
       }
     }
-    filterPanel.render();
-  });
+
+    if (!signal.aborted) filterPanel.render();
+  }, Config.filterDebounceMs);
+
+  filterEngine.addEventListener('change', applyFilters);
 
   // ── 12. Views persistence ──────────────────────────────────────────────
   filterEngine.addEventListener('views-change', () => {

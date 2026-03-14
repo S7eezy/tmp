@@ -59,12 +59,37 @@ export class FeatureTooltip {
               bestFeature = f;
               bestSourceId = sourceId;
             }
-          } else if (f.geometry.type === 'Polygon') {
-            const coords = f.geometry.coordinates[0] as [number, number][];
-            if (pointInPoly([lngLat.lng, lngLat.lat], coords)) {
-              bestFeature = f;
-              bestSourceId = sourceId;
-              bestDist = 0;
+          } else if (f.geometry.type === 'Polygon' || f.geometry.type === 'MultiPolygon') {
+            // Flatten to a list of outer rings and test each with ray-cast
+            const rings: [number, number][][] =
+              f.geometry.type === 'Polygon'
+                ? [f.geometry.coordinates[0] as [number, number][]]
+                : (f.geometry.coordinates as [number, number][][][]).map(poly => poly[0]);
+            for (const ring of rings) {
+              if (pointInPoly([lngLat.lng, lngLat.lat], ring)) {
+                bestFeature = f;
+                bestSourceId = sourceId;
+                bestDist = 0;
+                break;
+              }
+            }
+          } else if (f.geometry.type === 'LineString' || f.geometry.type === 'MultiLineString') {
+            // Flatten to a list of coordinate arrays and test screen-space distance to each segment
+            const lines: [number, number][][] =
+              f.geometry.type === 'LineString'
+                ? [f.geometry.coordinates as [number, number][]]
+                : f.geometry.coordinates as [number, number][][];
+            for (const line of lines) {
+              for (let j = 0; j < line.length - 1; j++) {
+                const a = this._engine.map.project(line[j]);
+                const b = this._engine.map.project(line[j + 1]);
+                const dist = distToSegment(point, a, b);
+                if (dist < 8 && dist < bestDist) {
+                  bestDist = dist;
+                  bestFeature = f;
+                  bestSourceId = sourceId;
+                }
+              }
             }
           }
         }
@@ -159,6 +184,19 @@ export class FeatureTooltip {
 // ---------------------------------------------------------------------------
 // Geometry helper
 // ---------------------------------------------------------------------------
+
+/** Screen-space distance from point `p` to segment `a`–`b` (pixels). */
+function distToSegment(
+  p: { x: number; y: number },
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+): number {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq));
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
 
 function pointInPoly(point: [number, number], ring: [number, number][]): boolean {
   let inside = false;
