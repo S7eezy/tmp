@@ -1,6 +1,7 @@
 // ---------------------------------------------------------------------------
 // DeckLayer – factory that wraps Elasticsearch GeoJSON data into optimised
-// deck.gl layer instances (ScatterplotLayer, PathLayer, PolygonLayer).
+// deck.gl layer instances (ScatterplotLayer, IconLayer, PathLayer, PolygonLayer,
+// TextLayer).
 //
 // PERFORMANCE STRATEGY
 //  1. Below Config.binaryThreshold features → plain GeoJSON accessor path.
@@ -12,14 +13,29 @@
 // ---------------------------------------------------------------------------
 
 import { ScatterplotLayer } from '@deck.gl/layers';
+import { IconLayer } from '@deck.gl/layers';
 import { PathLayer } from '@deck.gl/layers';
 import { PolygonLayer } from '@deck.gl/layers';
+import { TextLayer } from '@deck.gl/layers';
 import { DataFilterExtension } from '@deck.gl/extensions';
 import type { Layer as DeckGLLayer } from '@deck.gl/core';
 import type { Feature, Point, MultiLineString, Polygon } from 'geojson';
 
 import type { BaseLayer, LayerMeta } from './BaseLayer';
+import type { LayerStyleConfig } from './LayerStyleConfig';
+import { CATEGORICAL_PALETTE, lerpColor } from './LayerStyleConfig';
+import { getIconDef, iconToDataUrl } from './IconLibrary';
 import { Config } from '../../config';
+
+// ---------------------------------------------------------------------------
+// Icon atlas cache – lazily builds per-icon Image objects for IconLayer.
+// Uses SVG data URIs from IconLibrary rendered to Image elements.
+// ---------------------------------------------------------------------------
+
+/** No-op preload — kept for API compat. */
+export function preloadIcons(): Promise<void> {
+  return Promise.resolve();
+}
 
 // ---------------------------------------------------------------------------
 // Geometry discriminators
@@ -71,13 +87,19 @@ export class DeckLayerAdapter implements BaseLayer {
   readonly esIndex: string;
 
   /** Colour for rendering and panel swatches. */
-  readonly color: [number, number, number, number];
+  color: [number, number, number, number];
 
   private _data: Feature[] = [];
   private _filterRange: [number, number] = [1, 1];
   private _getFilterValue: (d: Feature) => number;
   private _dirty = true;
-  private _cachedLayer: DeckGLLayer | null = null;
+  private _cachedLayers: DeckGLLayer[] = [];
+  private _style: LayerStyleConfig | null = null;
+
+  // Pre-computed color accessor caches
+  private _colorAccessor: ((d: Feature) => [number, number, number, number]) | null = null;
+  private _fieldStats: { min: number; max: number } | null = null;
+  private _categoricalMap: Map<string, [number, number, number, number]> | null = null;
 
   constructor(opts: DeckLayerOptions) {
     this.meta = {
@@ -103,6 +125,11 @@ export class DeckLayerAdapter implements BaseLayer {
     return this._data.length;
   }
 
+  /** Current style config. */
+  get style(): LayerStyleConfig | null {
+    return this._style;
+  }
+
   // -- BaseLayer interface -------------------------------------------------
 
   setVisible(v: boolean): boolean {
@@ -124,6 +151,8 @@ export class DeckLayerAdapter implements BaseLayer {
   setData(features: Feature[]): void {
     this._data = features;
     this._dirty = true;
+    this._fieldStats = null;
+    this._categoricalMap = null;
   }
 
   /** Update GPU filter range (called by FilterEngine). */
@@ -132,31 +161,158 @@ export class DeckLayerAdapter implements BaseLayer {
     this._dirty = true;
   }
 
-  toDeckLayer(): DeckGLLayer | null {
-    if (!this.meta.visible) return null;
+  /** Apply a visual style configuration. */
+  setStyle(style: LayerStyleConfig | null): void {
+    this._style = style;
+    this._dirty = true;
+    this._colorAccessor = null;
+    this._fieldStats = null;
+    this._categoricalMap = null;
 
-    if (!this._dirty && this._cachedLayer) return this._cachedLayer;
+    // Update base color if static color is set
+    if (style?.color?.mode === 'static' && style.color.staticColor) {
+      this.color = [...style.color.staticColor] as [number, number, number, number];
+    }
+  }
+
+  /**
+   * Build deck.gl layers for this adapter.
+   * Returns an array (may include main layer + label layer).
+   */
+  toDeckLayers(): DeckGLLayer[] {
+    if (!this.meta.visible) return [];
+
+    if (!this._dirty && this._cachedLayers.length > 0) return this._cachedLayers;
     this._dirty = false;
 
-    const useBinary = this._data.length >= Config.binaryThreshold;
+    const useBinary = this._data.length >= Config.binaryThreshold && !this._style;
+    const layers: DeckGLLayer[] = [];
+
+    // Build color accessor if field-based
+    this._buildColorAccessor();
 
     switch (this.geoType) {
       case 'point':
-        this._cachedLayer = this._buildScatterplot(useBinary);
+        if (this._style?.icon) {
+          layers.push(this._buildIconLayer());
+        } else {
+          layers.push(this._buildScatterplot(useBinary));
+        }
         break;
       case 'line':
-        this._cachedLayer = this._buildPath(useBinary);
+        layers.push(this._buildPath(useBinary));
         break;
       case 'polygon':
-        this._cachedLayer = this._buildPolygon(useBinary);
+        layers.push(this._buildPolygon(useBinary));
         break;
     }
-    return this._cachedLayer;
+
+    // Add text label layer if configured
+    const labelLayer = this._buildLabelLayer();
+    if (labelLayer) layers.push(labelLayer);
+
+    this._cachedLayers = layers;
+    return layers;
+  }
+
+  /** Legacy single-layer compat (returns first layer or null). */
+  toDeckLayer(): DeckGLLayer | null {
+    const layers = this.toDeckLayers();
+    return layers.length > 0 ? layers[0] : null;
   }
 
   dispose(): void {
     this._data = [];
-    this._cachedLayer = null;
+    this._cachedLayers = [];
+  }
+
+  // -----------------------------------------------------------------------
+  // Color accessor
+  // -----------------------------------------------------------------------
+
+  private _buildColorAccessor(): void {
+    if (!this._style?.color || this._style.color.mode === 'static') {
+      this._colorAccessor = null;
+      return;
+    }
+
+    const cfg = this._style.color;
+    const field = cfg.field;
+    if (!field) { this._colorAccessor = null; return; }
+
+    if (cfg.colorMap && Object.keys(cfg.colorMap).length > 0) {
+      // Categorical: explicit color map
+      const map = cfg.colorMap;
+      this._colorAccessor = (d: Feature) => {
+        const val = String(d.properties?.[field] ?? '');
+        return map[val] ?? this.color;
+      };
+    } else if (cfg.gradient) {
+      // Numeric gradient
+      const grad = cfg.gradient;
+      const stats = this._computeFieldStats(field);
+      const minVal = grad.minVal ?? stats.min;
+      const maxVal = grad.maxVal ?? stats.max;
+      const range = maxVal - minVal || 1;
+      this._colorAccessor = (d: Feature) => {
+        const v = Number(d.properties?.[field] ?? 0);
+        const t = Math.max(0, Math.min(1, (v - minVal) / range));
+        return lerpColor(grad.min, grad.max, t);
+      };
+    } else {
+      // Auto-categorical: assign palette colors
+      const catMap = this._buildCategoricalMap(field);
+      this._colorAccessor = (d: Feature) => {
+        const val = String(d.properties?.[field] ?? '');
+        return catMap.get(val) ?? this.color;
+      };
+    }
+  }
+
+  private _computeFieldStats(field: string): { min: number; max: number } {
+    if (this._fieldStats) return this._fieldStats;
+    let min = Infinity, max = -Infinity;
+    for (const f of this._data) {
+      const v = Number(f.properties?.[field]);
+      if (!isNaN(v)) { if (v < min) min = v; if (v > max) max = v; }
+    }
+    if (!isFinite(min)) { min = 0; max = 1; }
+    this._fieldStats = { min, max };
+    return this._fieldStats;
+  }
+
+  private _buildCategoricalMap(field: string): Map<string, [number, number, number, number]> {
+    if (this._categoricalMap) return this._categoricalMap;
+    const unique = new Set<string>();
+    for (const f of this._data) {
+      unique.add(String(f.properties?.[field] ?? ''));
+      if (unique.size >= CATEGORICAL_PALETTE.length) break;
+    }
+    const map = new Map<string, [number, number, number, number]>();
+    let idx = 0;
+    for (const val of unique) {
+      map.set(val, CATEGORICAL_PALETTE[idx % CATEGORICAL_PALETTE.length]);
+      idx++;
+    }
+    this._categoricalMap = map;
+    return map;
+  }
+
+  private _getColor(d: Feature): [number, number, number, number] {
+    return this._colorAccessor ? this._colorAccessor(d) : this.color;
+  }
+
+  // -----------------------------------------------------------------------
+  // Orientation accessor
+  // -----------------------------------------------------------------------
+
+  private _getAngle(d: Feature): number {
+    if (!this._style?.orientation) return 0;
+    if (this._style.orientation.mode === 'static') return this._style.orientation.staticAngle ?? 0;
+    if (this._style.orientation.field) {
+      return Number(d.properties?.[this._style.orientation.field] ?? 0);
+    }
+    return 0;
   }
 
   // -----------------------------------------------------------------------
@@ -169,8 +325,9 @@ export class DeckLayerAdapter implements BaseLayer {
       getFilterValue: this._getFilterValue,
       filterRange: this._filterRange,
     };
+    const iconSize = this._style?.iconSize ?? 4;
 
-    if (binary && this._data.length > 0) {
+    if (binary && this._data.length > 0 && !this._colorAccessor) {
       const { positions, filterValues } = this._toBinaryPoints(
         this._data as PointFeature[],
       );
@@ -183,9 +340,8 @@ export class DeckLayerAdapter implements BaseLayer {
             getFilterValue: { value: filterValues, size: 1 },
           },
         },
-        getRadius: 4,
-        radiusMinPixels: Config.scatter.radiusMinPixels,
-        radiusMaxPixels: Config.scatter.radiusMaxPixels,
+        getRadius: iconSize,
+        radiusUnits: 'pixels',
         getFillColor: this.color,
         opacity: this.meta.opacity,
         pickable: Config.scatter.pickable,
@@ -201,16 +357,61 @@ export class DeckLayerAdapter implements BaseLayer {
       id: this.meta.id,
       data: this._data,
       getPosition: (d: PointFeature) => d.geometry.coordinates as [number, number],
-      getRadius: 4,
-      radiusMinPixels: Config.scatter.radiusMinPixels,
-      radiusMaxPixels: Config.scatter.radiusMaxPixels,
-      getFillColor: this.color,
+      getRadius: iconSize,
+      radiusUnits: 'pixels',
+      getFillColor: this._colorAccessor
+        ? ((d: PointFeature) => this._getColor(d))
+        : this.color,
       opacity: this.meta.opacity,
       pickable: Config.scatter.pickable,
       extensions,
       ...filterProps,
       updateTriggers: {
         getFilterValue: [this._filterRange],
+        getFillColor: [this._style?.color],
+      },
+    } as never);
+  }
+
+  /**
+   * Build an IconLayer that renders actual SVG icons from IconLibrary
+   * on top of the ScatterplotLayer base.
+   */
+  private _buildIconLayer(): DeckGLLayer {
+    const name = this._style!.icon!;
+    const iconSize = this._style?.iconSize ?? 24;
+    const iconDef = getIconDef(name);
+    if (!iconDef) return this._buildScatterplot(false); // fallback
+
+    // Build a single-icon atlas: 1×1 canvas
+    const atlasSize = Math.max(48, iconSize * 2);
+    const dataUrl = iconToDataUrl(iconDef, atlasSize, '#ffffff', 1.5);
+
+    const extensions = [new DataFilterExtension({ filterSize: 1 })];
+
+    return new IconLayer({
+      id: `${this.meta.id}-icon`,
+      data: this._data,
+      getPosition: (d: PointFeature) => d.geometry.coordinates as [number, number],
+      getIcon: () => ({
+        url: dataUrl,
+        width: atlasSize,
+        height: atlasSize,
+      }),
+      getSize: iconSize,
+      sizeUnits: 'pixels',
+      getAngle: (d: PointFeature) => -this._getAngle(d),
+      opacity: this.meta.opacity,
+      pickable: false,
+      loadOptions: { fetch: { mode: 'no-cors' } },
+      extensions,
+      getFilterValue: this._getFilterValue,
+      filterRange: this._filterRange,
+      updateTriggers: {
+        getFilterValue: [this._filterRange],
+        getIcon: [this._style?.icon],
+        getSize: [this._style?.iconSize],
+        getAngle: [this._style?.orientation],
       },
     } as never);
   }
@@ -218,8 +419,6 @@ export class DeckLayerAdapter implements BaseLayer {
   private _buildPath(_binary: boolean): DeckGLLayer {
     const extensions = [new DataFilterExtension({ filterSize: 1 })];
 
-    // PathLayer expects one path per datum.
-    // Flatten MultiLineString features into individual PathDatum entries.
     const data: PathDatum[] = [];
     for (const f of this._data) {
       if (f.geometry.type === 'LineString') {
@@ -231,13 +430,17 @@ export class DeckLayerAdapter implements BaseLayer {
       }
     }
 
+    const widthPixels = this._style?.iconSize ?? Config.path.widthMinPixels;
+
     return new PathLayer({
       id: this.meta.id,
       data,
       getPath: (d: PathDatum) => d.path,
-      getColor: this.color,
-      widthMinPixels: Config.path.widthMinPixels,
-      widthMaxPixels: Config.path.widthMaxPixels,
+      getColor: this._colorAccessor
+        ? ((d: PathDatum) => this._getColor(d.source))
+        : this.color,
+      widthMinPixels: widthPixels,
+      widthMaxPixels: Math.max(widthPixels, Config.path.widthMaxPixels),
       opacity: this.meta.opacity,
       pickable: Config.path.pickable,
       extensions,
@@ -245,6 +448,7 @@ export class DeckLayerAdapter implements BaseLayer {
       filterRange: this._filterRange,
       updateTriggers: {
         getFilterValue: [this._filterRange],
+        getColor: [this._style?.color],
       },
     } as never);
   }
@@ -256,7 +460,9 @@ export class DeckLayerAdapter implements BaseLayer {
       data: this._data,
       getPolygon: (d: PolygonFeature) =>
         d.geometry.coordinates as [number, number][][],
-      getFillColor: this.color,
+      getFillColor: this._colorAccessor
+        ? ((d: PolygonFeature) => this._getColor(d))
+        : this.color,
       getLineColor: [255, 255, 255, 180] as [number, number, number, number],
       filled: Config.polygon.filled,
       stroked: Config.polygon.stroked,
@@ -268,6 +474,37 @@ export class DeckLayerAdapter implements BaseLayer {
       filterRange: this._filterRange,
       updateTriggers: {
         getFilterValue: [this._filterRange],
+        getFillColor: [this._style?.color],
+      },
+    } as never);
+  }
+
+  private _buildLabelLayer(): DeckGLLayer | null {
+    const lbl = this._style?.label;
+    if (!lbl || lbl.mode === 'none') return null;
+    if (this.geoType !== 'point') return null;
+
+    const fontSize = lbl.fontSize ?? 12;
+
+    return new TextLayer({
+      id: `${this.meta.id}-labels`,
+      data: this._data,
+      getPosition: (d: PointFeature) => d.geometry.coordinates as [number, number],
+      getText: lbl.mode === 'static'
+        ? () => lbl.staticText ?? ''
+        : (d: Feature) => String(d.properties?.[lbl.field!] ?? ''),
+      getSize: fontSize,
+      getColor: [255, 255, 255, 220],
+      getAngle: 0,
+      getTextAnchor: 'middle' as const,
+      getAlignmentBaseline: 'top' as const,
+      getPixelOffset: [0, 12],
+      fontFamily: 'Inter, system-ui, sans-serif',
+      fontWeight: 600,
+      opacity: this.meta.opacity,
+      pickable: false,
+      updateTriggers: {
+        getText: [lbl.mode, lbl.field, lbl.staticText],
       },
     } as never);
   }

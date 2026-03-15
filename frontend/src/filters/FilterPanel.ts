@@ -13,6 +13,7 @@ import {
   type ValueFieldType, type ValueOp, type GeoBounds, type FilterView,
 } from './types';
 import { FilterEngine, newFilterId } from './FilterEngine';
+import type { MapEngine } from '@core/map';
 
 // ---------------------------------------------------------------------------
 // Country catalogue (maritime nations, approximate bounding boxes)
@@ -122,6 +123,7 @@ export interface FilterPanelOptions {
   getFeatures: (id: string) => Feature[];
   onStartDrawPolygon?: () => void;
   onStartDrawBbox?: () => void;
+  mapEngine?: MapEngine;
 }
 
 export class FilterPanel {
@@ -131,11 +133,16 @@ export class FilterPanel {
   private _getFeatures: (id: string) => Feature[];
   private _onStartDrawPolygon?: () => void;
   private _onStartDrawBbox?: () => void;
+  private _mapEngine: MapEngine | null;
 
   private _form: FormState;
   private _fieldCache = new Map<string, FieldInfo[]>();
   private _activeSection: 'filters' | 'views' = 'filters';
   private _showViewSaveForm = false;
+
+  // SVG overlay for geo filter hover preview
+  private _hoverSvg: SVGSVGElement | null = null;
+  private _hoverMapMoveHandler: (() => void) | null = null;
 
   constructor(opts: FilterPanelOptions) {
     this._engine = opts.engine;
@@ -144,6 +151,7 @@ export class FilterPanel {
     this._getFeatures = opts.getFeatures;
     this._onStartDrawPolygon = opts.onStartDrawPolygon;
     this._onStartDrawBbox    = opts.onStartDrawBbox;
+    this._mapEngine = opts.mapEngine ?? null;
     this._form = defaultForm(opts.getIndexes());
   }
 
@@ -165,6 +173,9 @@ export class FilterPanel {
   }
 
   render(): void {
+    // Clean up any hover preview (cards are about to be destroyed)
+    this._hideGeoPreview();
+
     const body = this._bodyEl;
     body.innerHTML = '';
 
@@ -216,6 +227,44 @@ export class FilterPanel {
       body.appendChild(this._makeCard(filter));
     }
     body.appendChild(this._makeAddArea());
+
+    // Saved filters library
+    const saved = this._engine.savedFilters;
+    if (saved.length > 0) {
+      body.appendChild(this._makeSavedFilterLibrary(saved));
+    }
+  }
+
+  private _makeSavedFilterLibrary(saved: ActiveFilter[]): HTMLElement {
+    const area = _el('div', { class: 'fp-library-area' });
+    area.appendChild(_el('div', { class: 'fp-library-title' }, 'Saved Filters'));
+
+    // Sort saved filters by label (alphabetical)
+    const sorted = [...saved].sort((a, b) => a.label.localeCompare(b.label));
+
+    for (const f of sorted) {
+      const item = _el('div', { class: 'fp-library-item' });
+      const badge = _el('span', {
+        class: `fp-library-item__badge fp-badge--${f.kind}`,
+      }, f.kind === 'geo' ? 'GEO' : f.kind === 'time' ? 'TIME' : 'VAL');
+      const name = _el('span', { class: 'fp-library-item__name' }, f.label);
+      const addBtn = _el('button', { class: 'fp-library-item__add' }, '+ Add');
+      addBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._engine.addFromLibrary(f.id);
+        this.render();
+      });
+      const delBtn = _el('button', { class: 'fp-library-item__del' }, '×');
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this._engine.removeSavedFilter(f.id);
+        this.render();
+      });
+      item.append(badge, name, addBtn, delBtn);
+      area.appendChild(item);
+    }
+
+    return area;
   }
 
   private _renderViewsSection(body: HTMLElement): void {
@@ -258,6 +307,7 @@ export class FilterPanel {
     tog.addEventListener('click', e => {
       e.stopPropagation();
       this._engine.toggleView(view.name);
+      this.render();
     });
 
     const del = _el('button', { class: 'fp-card-delete', title: 'Remove view' }, '×');
@@ -322,17 +372,71 @@ export class FilterPanel {
     const header = _el('div', { class: 'fp-card-header' });
     const badge = _el('span', { class: `fp-badge fp-badge--${f.kind}` },
       f.kind === 'geo' ? 'GEO' : f.kind === 'time' ? 'TIME' : 'VAL');
+
+    // Label with inline rename on double-click — updates live while typing
     const labelEl = _el('span', { class: 'fp-card-label' }, f.label);
+    labelEl.addEventListener('dblclick', (e) => {
+      e.stopPropagation();
+      const input = _el('input', { class: 'fp-rename-input', type: 'text', value: f.label }) as HTMLInputElement;
+      input.value = f.label;
+
+      // Live rename on every keystroke (silent = true to avoid re-render)
+      input.addEventListener('input', () => {
+        const newName = input.value.trim();
+        if (newName) {
+          this._engine.rename(f.id, newName, true);
+        }
+      });
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' || ev.key === 'Escape') {
+          input.blur();
+        }
+      });
+      input.addEventListener('blur', () => {
+        // Final rename with event emission for persistence
+        const finalName = input.value.trim();
+        if (finalName && finalName !== f.label) {
+          this._engine.rename(f.id, finalName);
+        }
+        this.render();
+      });
+
+      labelEl.textContent = '';
+      labelEl.appendChild(input);
+      input.focus();
+      input.select();
+    });
+
     const tog = _el('div', {
       class: `fp-toggle${f.enabled ? ' fp-toggle--on' : ''}`,
       title: f.enabled ? 'Disable filter' : 'Enable filter',
     });
-    tog.addEventListener('click', e => { e.stopPropagation(); this._engine.toggle(f.id); });
+    tog.addEventListener('click', e => { e.stopPropagation(); this._engine.toggle(f.id); this.render(); });
+
+    // Save to library button (material save icon)
+    const saveToLib = _el('button', { class: 'fp-save-btn', title: 'Save to library' });
+    saveToLib.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>';
+    saveToLib.addEventListener('click', e => {
+      e.stopPropagation();
+      const ok = this._engine.saveFilter(f);
+      if (!ok) {
+        saveToLib.title = 'A filter with this name already exists';
+        saveToLib.classList.add('fp-save-btn--error');
+        setTimeout(() => {
+          saveToLib.title = 'Save to library';
+          saveToLib.classList.remove('fp-save-btn--error');
+        }, 1500);
+        return;
+      }
+      this.render();
+    });
+
     const del = _el('button', { class: 'fp-card-delete', title: 'Remove filter' }, '×');
     del.addEventListener('click', e => { e.stopPropagation(); this._engine.remove(f.id); });
 
     header.appendChild(badge);
     header.appendChild(labelEl);
+    header.appendChild(saveToLib);
     header.appendChild(tog);
     header.appendChild(del);
 
@@ -344,7 +448,120 @@ export class FilterPanel {
     card.appendChild(header);
     card.appendChild(summary);
     card.appendChild(scope);
+
+    // Hover preview for geo filters — show shape on map
+    if (f.kind === 'geo' && this._mapEngine) {
+      card.addEventListener('mouseenter', () => this._showGeoPreview(f as GeoFilter));
+      card.addEventListener('mouseleave', () => this._hideGeoPreview());
+    }
+
     return card;
+  }
+
+  // ── Geo filter hover preview ──────────────────────────────────────────────
+
+  private _showGeoPreview(f: GeoFilter): void {
+    if (!this._mapEngine) return;
+    this._hideGeoPreview(); // clean up any previous
+
+    const map = this._mapEngine.map;
+    const container = map.getContainer();
+
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'geo-hover-overlay');
+    svg.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:11;';
+    container.appendChild(svg);
+    this._hoverSvg = svg;
+    const renderShape = () => {
+      if (!this._hoverSvg) return;
+      this._hoverSvg.innerHTML = '';
+
+      if (f.mode === 'bbox') {
+        const bbox = f.bbox;
+        if (!bbox) return;
+        // Project corners to screen
+        const nw = map.project([bbox.west, bbox.north]);
+        const se = map.project([bbox.east, bbox.south]);
+        const x = Math.min(nw.x, se.x);
+        const y = Math.min(nw.y, se.y);
+        const w = Math.abs(se.x - nw.x);
+        const h = Math.abs(se.y - nw.y);
+
+        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        rect.setAttribute('x', String(x));
+        rect.setAttribute('y', String(y));
+        rect.setAttribute('width', String(w));
+        rect.setAttribute('height', String(h));
+        rect.setAttribute('fill', 'rgba(251, 191, 36, 0.15)');
+        rect.setAttribute('stroke', '#fbbf24');
+        rect.setAttribute('stroke-width', '2.5');
+        rect.setAttribute('stroke-dasharray', '8 4');
+        this._hoverSvg.appendChild(rect);
+      } else if (f.mode === 'polygon' && f.polygon && f.polygon.length >= 3) {
+        const screenPts = f.polygon.map(p => {
+          const px = map.project(p as [number, number]);
+          return `${px.x},${px.y}`;
+        });
+        const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+        poly.setAttribute('points', screenPts.join(' '));
+        poly.setAttribute('fill', 'rgba(251, 191, 36, 0.15)');
+        poly.setAttribute('stroke', '#fbbf24');
+        poly.setAttribute('stroke-width', '2.5');
+        poly.setAttribute('stroke-dasharray', '8 4');
+        this._hoverSvg.appendChild(poly);
+      } else if (f.mode === 'country' && f.country) {
+        // Look up country bbox from catalogue
+        const c = COUNTRIES.find(c => c.code === f.country);
+        if (!c) return;
+        const nw = map.project([c.bbox.west, c.bbox.north]);
+        const se = map.project([c.bbox.east, c.bbox.south]);
+        const x = Math.min(nw.x, se.x);
+        const y = Math.min(nw.y, se.y);
+        const w = Math.abs(se.x - nw.x);
+        const h = Math.abs(se.y - nw.y);
+
+        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        rect.setAttribute('x', String(x));
+        rect.setAttribute('y', String(y));
+        rect.setAttribute('width', String(w));
+        rect.setAttribute('height', String(h));
+        rect.setAttribute('fill', 'rgba(251, 191, 36, 0.15)');
+        rect.setAttribute('stroke', '#fbbf24');
+        rect.setAttribute('stroke-width', '2.5');
+        rect.setAttribute('stroke-dasharray', '8 4');
+        this._hoverSvg.appendChild(rect);
+
+        // Country label
+        const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        text.setAttribute('x', String(x + w / 2));
+        text.setAttribute('y', String(y + h / 2));
+        text.setAttribute('text-anchor', 'middle');
+        text.setAttribute('dominant-baseline', 'central');
+        text.setAttribute('fill', '#fbbf24');
+        text.setAttribute('font-size', '13');
+        text.setAttribute('font-weight', '600');
+        text.setAttribute('font-family', 'Inter, system-ui, sans-serif');
+        text.textContent = c.name;
+        this._hoverSvg.appendChild(text);
+      }
+    };
+
+    renderShape();
+
+    // Re-render on map move/zoom
+    this._hoverMapMoveHandler = renderShape;
+    map.on('move', this._hoverMapMoveHandler);
+  }
+
+  private _hideGeoPreview(): void {
+    if (this._hoverSvg && this._hoverSvg.parentNode) {
+      this._hoverSvg.parentNode.removeChild(this._hoverSvg);
+    }
+    this._hoverSvg = null;
+    if (this._hoverMapMoveHandler && this._mapEngine) {
+      this._mapEngine.map.off('move', this._hoverMapMoveHandler);
+      this._hoverMapMoveHandler = null;
+    }
   }
 
   private _makeAddArea(): HTMLElement {

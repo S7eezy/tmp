@@ -1,8 +1,11 @@
 export { Toolbar } from './Toolbar';
 export type { PanelName } from './Toolbar';
 export { SidePanel } from './SidePanel';
-export type { SidePanelDeps } from './SidePanel';
+export type { SidePanelDeps, HiddenIndexes } from './SidePanel';
 export { SettingsModal } from './SettingsModal';
+export { DataConfigModal } from './DataConfigModal';
+export type { DataVisibilityConfig } from './DataConfigModal';
+export { LayerStyleModal } from './LayerStyleModal';
 export { FeatureTooltip } from './FeatureTooltip';
 export type { PinnedTooltip } from './FeatureTooltip';
 export { DrawMode } from './DrawMode';

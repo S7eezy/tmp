@@ -61,6 +61,11 @@ export class ElasticClient {
     this._base = baseUrl.replace(/\/$/, '');
   }
 
+  /** Public accessor for the base URL. */
+  get baseUrl(): string {
+    return this._base;
+  }
+
   // -- Raw search ---------------------------------------------------------
 
   async search(opts: EsSearchOptions): Promise<EsSearchResponse> {

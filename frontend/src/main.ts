@@ -8,12 +8,13 @@
 import './style.css';
 
 import { MapEngine } from '@core/map';
-import { LayerRegistry, DeckLayerAdapter, WmsLayerAdapter } from '@core/layers';
+import { LayerRegistry, DeckLayerAdapter, WmsLayerAdapter, preloadIcons } from '@core/layers';
 import type { GeoType } from '@core/layers';
-import { DataStore, ElasticClient } from '@core/data';
+import { DataStore, ElasticClient, GeoServerClient } from '@core/data';
 import type { EsIndexInfo } from '@core/data';
+import { Config } from './config';
 import { FilterEngine, FilterPanel } from '@filters';
-import { Toolbar, SidePanel, SettingsModal, FeatureTooltip, DrawMode, SearchPanel, Hud } from '@ui';
+import { Toolbar, SidePanel, SettingsModal, DataConfigModal, LayerStyleModal, FeatureTooltip, DrawMode, SearchPanel, Hud } from '@ui';
 import type { Feature } from 'geojson';
 
 // ---------------------------------------------------------------------------
@@ -58,10 +59,10 @@ async function boot(): Promise<void> {
   const filterEngine  = new FilterEngine();
   const esClient      = new ElasticClient();
 
-  // ── 2. Map engine ───────────────────────────────────────────────────────
+  // ── 2. Map engine + preload icons ────────────────────────────────────────
   const engine = new MapEngine({ container: 'map' });
-  await engine.whenReady();
-  console.log('[FleetTracker] Map ready');
+  await Promise.all([engine.whenReady(), preloadIcons()]);
+  console.log('[FleetTracker] Map ready, icons preloaded');
 
   // ── 3. Load Elasticsearch indices ───────────────────────────────────────
   let indices: EsIndexInfo[] = [];
@@ -130,29 +131,90 @@ async function boot(): Promise<void> {
 
   console.log(`[FleetTracker] Loaded ${dataStore.totalFeatures()} features from ${indices.length} indices in ${(performance.now() - t0).toFixed(1)}ms`);
 
-  // ── 5. Example WMS layer ───────────────────────────────────────────────
-  const demoWms = new WmsLayerAdapter({
-    id: 'osm-wms',
-    label: 'OpenStreetMap WMS',
-    wmsUrl: 'https://ows.terrestris.de/osm/service',
-    wmsParams: { LAYERS: 'OSM-WMS' },
-    tileKind: 'raster',
-    minZoom: 0,
-    maxZoom: 18,
-    visible: false,
-    zIndex: -1,
-  });
-  layerRegistry.add(demoWms);
-  demoWms.attach(engine);
+  // ── 5. Discover GeoServer layers & tiles ────────────────────────────────
+  const geoServerClient = new GeoServerClient();
+  try {
+    const { wmsLayers } = await geoServerClient.listAllLayers();
+    console.log(`[FleetTracker] GeoServer: discovered ${wmsLayers.length} WMS layers`);
+
+    for (const gsLayer of wmsLayers) {
+      const id = `gs-${gsLayer.name.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+      const wms = new WmsLayerAdapter({
+        id,
+        label: gsLayer.title || gsLayer.name,
+        wmsUrl: `${Config.geoserverBaseUrl}/wms`,
+        wmsParams: { LAYERS: gsLayer.name },
+        tileKind: 'raster',
+        minZoom: 0,
+        maxZoom: 22,
+        visible: false,
+        zIndex: -1,
+      });
+      layerRegistry.add(wms);
+      wms.attach(engine);
+    }
+  } catch (err) {
+    console.warn('[FleetTracker] Could not connect to GeoServer:', err);
+    console.log('[FleetTracker] Running without GeoServer layers.');
+  }
+
+  // Fallback: keep the demo WMS layer if no GeoServer layers were discovered
+  if (layerRegistry.all().filter(l => l.meta.kind === 'maplibre').length === 0) {
+    const demoWms = new WmsLayerAdapter({
+      id: 'osm-wms',
+      label: 'OpenStreetMap WMS',
+      wmsUrl: 'https://ows.terrestris.de/osm/service',
+      wmsParams: { LAYERS: 'OSM-WMS' },
+      tileKind: 'raster',
+      minZoom: 0,
+      maxZoom: 18,
+      visible: false,
+      zIndex: -1,
+    });
+    layerRegistry.add(demoWms);
+    demoWms.attach(engine);
+  }
 
   // ── 6. UI components ───────────────────────────────────────────────────
   const settingsModal = new SettingsModal(dataStore, rawData);
   const hud           = new Hud(engine, dataStore);
   const toolbar       = new Toolbar(filterEngine);
+
+  // Data config modal: manages which ES indexes are visible in the DATA panel
+  const dataConfigModal = new DataConfigModal({
+    esClient,
+    hiddenIndexes: new Set(),
+    geoFieldsCache,
+    onSave: (hidden) => {
+      sidePanel.setHiddenIndexes(hidden);
+      sidePanel.render();
+    },
+  });
+  dataConfigModal.setIndices(indices);
+
+  // Load saved data visibility config from ES
+  dataConfigModal.loadConfig().then(hidden => {
+    sidePanel.setHiddenIndexes(hidden);
+    sidePanel.render();
+  }).catch(() => { /* ignore – config not yet saved */ });
+
+  // Layer style editor: manages per-layer visual configuration
+  const layerStyleModal = new LayerStyleModal({
+    layerRegistry,
+    dataStore,
+    esClient,
+    onStyleChange: () => sync(),
+  });
+  // Load saved styles from ES on boot
+  layerStyleModal.loadFromES().catch(() => { /* ignore */ });
+
   const sidePanel     = new SidePanel({
     layerRegistry,
     dataStore,
     onOpenSettings: (id: string) => settingsModal.open(id),
+    onOpenDataConfig: () => dataConfigModal.open(),
+    onOpenStyleEditor: (id: string) => layerStyleModal.open(id),
+    geoFieldsCache,
   });
   const featureTooltip = new FeatureTooltip(engine, dataStore, settingsModal);
   const drawMode       = new DrawMode(engine, () => filterPanel);
@@ -160,7 +222,11 @@ async function boot(): Promise<void> {
 
   // ── 7. Sync registry → engine + panels ─────────────────────────────────
   const sync = (): void => {
-    engine.setDeckLayers(layerRegistry.buildDeckLayers());
+    try {
+      engine.setDeckLayers(layerRegistry.buildDeckLayers());
+    } catch (err) {
+      console.error('[FleetTracker] Error building deck layers:', err);
+    }
     hud.updateFeatureCount();
     sidePanel.render();
   };
@@ -196,6 +262,7 @@ async function boot(): Promise<void> {
     getFeatures: (id) => rawData.get(id) ?? [],
     onStartDrawPolygon: () => drawMode.start('polygon'),
     onStartDrawBbox:    () => drawMode.start('bbox'),
+    mapEngine: engine,
   });
   filterPanel.render();
 
@@ -252,16 +319,16 @@ async function boot(): Promise<void> {
 
   filterEngine.addEventListener('change', applyFilters);
 
-  // ── 12. Views persistence ──────────────────────────────────────────────
+  // ── 12. Views & saved-filters persistence (Elasticsearch) ──────────────
+  filterEngine.setEsBaseUrl(Config.esBaseUrl);
   filterEngine.addEventListener('views-change', () => {
-    try { localStorage.setItem('ft-views', filterEngine.serializeViews()); } catch { /* noop */ }
     filterPanel.render();
   });
 
-  try {
-    const saved = localStorage.getItem('ft-views');
-    if (saved) filterEngine.deserializeViews(saved);
-  } catch { /* noop */ }
+  // Load saved views + saved filters from ES on boot
+  filterEngine.loadFromES().then(() => {
+    filterPanel.render();
+  }).catch(() => { /* config not yet saved */ });
 
   // ── 13. Expose globals for debugging ───────────────────────────────────
   Object.assign(window, { ft: { engine, layerRegistry, dataStore, filterEngine, esClient } });

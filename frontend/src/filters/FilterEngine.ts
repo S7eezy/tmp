@@ -12,6 +12,14 @@ import type {
 import type { Feature } from 'geojson';
 
 // ---------------------------------------------------------------------------
+// ES persistence constants
+// ---------------------------------------------------------------------------
+
+const CONFIG_INDEX = '.fleettracker-config';
+const VIEWS_DOC_ID = 'filter-views';
+const SAVED_FILTERS_DOC_ID = 'saved-filters';
+
+// ---------------------------------------------------------------------------
 // ID generator
 // ---------------------------------------------------------------------------
 
@@ -65,6 +73,60 @@ export class FilterEngine extends EventTarget {
   }
 
   clear(): void { this._filters = []; this._emit(); }
+
+  /**
+   * Rename a filter.
+   * @param silent – if true, skip emitting `change` (avoids re-query + re-render
+   *                 while the user is still typing in the rename input).
+   */
+  rename(id: string, newLabel: string, silent = false): void {
+    const f = this._filters.find(f => f.id === id);
+    if (f) {
+      f.label = newLabel;
+      if (!silent) this._emit();
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Saved Filters Library – individual filters saved for reuse
+  // -------------------------------------------------------------------------
+
+  private _savedFilters: ActiveFilter[] = [];
+
+  get savedFilters(): ActiveFilter[] { return [...this._savedFilters]; }
+
+  saveFilter(filter: ActiveFilter): boolean {
+    // Prevent duplicate names in library
+    if (this._savedFilters.some(f => f.label === filter.label)) {
+      return false;
+    }
+    const saved = JSON.parse(JSON.stringify(filter));
+    saved.id = `saved-${Date.now()}`;
+    this._savedFilters.push(saved);
+    this._emitViews();
+    return true;
+  }
+
+  removeSavedFilter(id: string): void {
+    this._savedFilters = this._savedFilters.filter(f => f.id !== id);
+    this._emitViews();
+  }
+
+  addFromLibrary(savedId: string): void {
+    const saved = this._savedFilters.find(f => f.id === savedId);
+    if (!saved) return;
+    const clone: ActiveFilter = JSON.parse(JSON.stringify(saved));
+    clone.id = newFilterId();
+    clone.enabled = true;
+    this._filters.push(clone);
+    this._emit();
+  }
+
+  serializeSavedFilters(): string { return JSON.stringify(this._savedFilters); }
+
+  deserializeSavedFilters(json: string): void {
+    try { this._savedFilters = JSON.parse(json); } catch { /* ignore */ }
+  }
 
   // -------------------------------------------------------------------------
   // Views – save/load/toggle named filter combinations
@@ -337,6 +399,83 @@ export class FilterEngine extends EventTarget {
   }
 
   // -------------------------------------------------------------------------
+  // Elasticsearch persistence
+  // -------------------------------------------------------------------------
+
+  private _esBaseUrl: string | null = null;
+
+  /** Set the ES base URL to enable ES persistence. */
+  setEsBaseUrl(url: string): void {
+    this._esBaseUrl = url.replace(/\/$/, '');
+  }
+
+  /** Ensure the config index exists (HEAD check, create only if missing). */
+  private async _ensureConfigIndex(): Promise<void> {
+    if (!this._esBaseUrl) return;
+    try {
+      const head = await fetch(`${this._esBaseUrl}/${CONFIG_INDEX}`, { method: 'HEAD' });
+      if (head.ok) return;
+      await fetch(`${this._esBaseUrl}/${CONFIG_INDEX}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ settings: { number_of_shards: 1, number_of_replicas: 0 } }),
+      });
+    } catch { /* ignore */ }
+  }
+
+  /** Load saved views + saved filters from ES. */
+  async loadFromES(): Promise<void> {
+    if (!this._esBaseUrl) return;
+    try {
+      const [viewsRes, filtersRes] = await Promise.all([
+        fetch(`${this._esBaseUrl}/${CONFIG_INDEX}/_doc/${VIEWS_DOC_ID}`),
+        fetch(`${this._esBaseUrl}/${CONFIG_INDEX}/_doc/${SAVED_FILTERS_DOC_ID}`),
+      ]);
+      if (viewsRes.ok) {
+        const doc = await viewsRes.json();
+        this._views = doc._source?.views ?? [];
+      }
+      if (filtersRes.ok) {
+        const doc = await filtersRes.json();
+        this._savedFilters = doc._source?.filters ?? [];
+      }
+      this._emitViews();
+    } catch {
+      // Config doesn't exist yet – fine
+    }
+  }
+
+  /** Persist saved views to ES. */
+  private async _saveViewsToES(): Promise<void> {
+    if (!this._esBaseUrl) return;
+    try {
+      await this._ensureConfigIndex();
+      await fetch(`${this._esBaseUrl}/${CONFIG_INDEX}/_doc/${VIEWS_DOC_ID}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ views: this._views }),
+      });
+    } catch (err) {
+      console.error('[FilterEngine] Failed to save views to ES:', err);
+    }
+  }
+
+  /** Persist saved filters library to ES. */
+  private async _saveSavedFiltersToES(): Promise<void> {
+    if (!this._esBaseUrl) return;
+    try {
+      await this._ensureConfigIndex();
+      await fetch(`${this._esBaseUrl}/${CONFIG_INDEX}/_doc/${SAVED_FILTERS_DOC_ID}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filters: this._savedFilters }),
+      });
+    } catch (err) {
+      console.error('[FilterEngine] Failed to save filters to ES:', err);
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Private
   // -------------------------------------------------------------------------
 
@@ -350,6 +489,9 @@ export class FilterEngine extends EventTarget {
     this.dispatchEvent(new CustomEvent('views-change', {
       detail: { views: this.views },
     }));
+    // Fire-and-forget ES persistence
+    this._saveViewsToES();
+    this._saveSavedFiltersToES();
   }
 }
 

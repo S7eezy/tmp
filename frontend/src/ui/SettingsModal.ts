@@ -48,27 +48,57 @@ export class SettingsModal {
     info.textContent = 'Toggle which attributes appear in the tooltip when clicking features:';
     bodyEl.appendChild(info);
 
+    // Search bar
+    const searchWrap = document.createElement('div');
+    searchWrap.className = 'settings-search-wrap';
+    const searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.className = 'settings-search';
+    searchInput.placeholder = 'Search attributes...';
+    searchWrap.appendChild(searchInput);
+    bodyEl.appendChild(searchWrap);
+
     const list = document.createElement('div');
     list.className = 'settings-attr-list';
 
-    for (const [attr, visible] of Object.entries(config.attributes)) {
-      const item = document.createElement('label');
-      item.className = 'settings-attr-item';
+    const entries = Object.entries(config.attributes);
 
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = visible;
-      cb.addEventListener('change', () => {
-        const cfg = this._attrConfigs.get(sourceId);
-        if (cfg) cfg.attributes[attr] = cb.checked;
-      });
+    const renderList = (filter: string) => {
+      list.innerHTML = '';
+      const q = filter.toLowerCase();
+      for (const [attr, visible] of entries) {
+        if (q && !attr.toLowerCase().includes(q)) continue;
 
-      const nameSpan = document.createElement('span');
-      nameSpan.textContent = attr;
+        const item = document.createElement('label');
+        item.className = 'settings-attr-item';
 
-      item.append(cb, nameSpan);
-      list.appendChild(item);
-    }
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = visible;
+        cb.addEventListener('change', () => {
+          const cfg = this._attrConfigs.get(sourceId);
+          if (cfg) cfg.attributes[attr] = cb.checked;
+          // Update the entries array in-place for consistency
+          const idx = entries.findIndex(e => e[0] === attr);
+          if (idx >= 0) entries[idx][1] = cb.checked;
+        });
+
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = attr;
+
+        item.append(cb, nameSpan);
+        list.appendChild(item);
+      }
+      if (list.children.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'settings-hint';
+        empty.textContent = 'No matching attributes';
+        list.appendChild(empty);
+      }
+    };
+
+    searchInput.addEventListener('input', () => renderList(searchInput.value));
+    renderList('');
 
     bodyEl.appendChild(list);
     overlay.style.display = 'flex';

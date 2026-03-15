@@ -51,8 +51,8 @@ export const Config = {
     pickable: true,
   },
 
-  /** Map style – free OpenFreeMap tiles (no API key). */
+  /** Map style – dark OpenFreeMap tiles (no API key). */
   mapStyle:
     import.meta.env.VITE_MAP_STYLE ??
-    'https://tiles.openfreemap.org/styles/liberty',
+    'https://tiles.openfreemap.org/styles/dark',
 } as const;

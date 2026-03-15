@@ -66,8 +66,18 @@ export class LayerRegistry extends EventTarget {
     const result: DeckGLLayer[] = [];
     for (const layer of this.all()) {
       if (layer.meta.kind === 'deck') {
-        const dl = layer.toDeckLayer();
-        if (dl) result.push(dl);
+        try {
+          // Support both single-layer and multi-layer adapters
+          if ('toDeckLayers' in layer && typeof (layer as any).toDeckLayers === 'function') {
+            const layers = (layer as any).toDeckLayers() as DeckGLLayer[];
+            result.push(...layers);
+          } else {
+            const dl = layer.toDeckLayer();
+            if (dl) result.push(dl);
+          }
+        } catch (err) {
+          console.error(`[LayerRegistry] Error building layer "${layer.meta.id}":`, err);
+        }
       }
     }
     return result;
