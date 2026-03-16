@@ -10,7 +10,7 @@
 
 import type { Layer as DeckGLLayer } from '@deck.gl/core';
 
-export type LayerKind = 'deck' | 'maplibre';
+export type LayerKind = 'deck' | 'maplibre' | 'tileserver';
 
 export interface LayerMeta {
   /** Unique layer id (must be stable across re-renders). */

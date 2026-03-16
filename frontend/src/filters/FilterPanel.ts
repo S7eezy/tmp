@@ -139,6 +139,8 @@ export class FilterPanel {
   private _fieldCache = new Map<string, FieldInfo[]>();
   private _activeSection: 'filters' | 'views' = 'filters';
   private _showViewSaveForm = false;
+  /** Tracks which saved-filter categories are collapsed (persists across renders). */
+  private _collapsedLibraryCats = new Set<string>();
 
   // SVG overlay for geo filter hover preview
   private _hoverSvg: SVGSVGElement | null = null;
@@ -239,29 +241,84 @@ export class FilterPanel {
     const area = _el('div', { class: 'fp-library-area' });
     area.appendChild(_el('div', { class: 'fp-library-title' }, 'Saved Filters'));
 
-    // Sort saved filters by label (alphabetical)
-    const sorted = [...saved].sort((a, b) => a.label.localeCompare(b.label));
+    // Group by kind (geo / time / value)
+    // SVG icons (stroke-based, 24×24 viewBox) replace emojis for consistency
+    const CAT_ICONS: Record<string, string> = {
+      geo:   '<circle cx="12" cy="10" r="3"/><path d="M12 2a8 8 0 0 0-8 8c0 5.25 8 13 8 13s8-7.75 8-13a8 8 0 0 0-8-8z"/>',
+      time:  '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+      value: '<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>',
+    };
+    const groups: Record<string, { label: string; icon: string; badge: string; filters: ActiveFilter[] }> = {
+      geo:   { label: 'Geo Filters',   icon: CAT_ICONS.geo,   badge: 'GEO',  filters: [] },
+      time:  { label: 'Time Filters',  icon: CAT_ICONS.time,  badge: 'TIME', filters: [] },
+      value: { label: 'Value Filters', icon: CAT_ICONS.value, badge: 'VAL',  filters: [] },
+    };
 
-    for (const f of sorted) {
-      const item = _el('div', { class: 'fp-library-item' });
-      const badge = _el('span', {
-        class: `fp-library-item__badge fp-badge--${f.kind}`,
-      }, f.kind === 'geo' ? 'GEO' : f.kind === 'time' ? 'TIME' : 'VAL');
-      const name = _el('span', { class: 'fp-library-item__name' }, f.label);
-      const addBtn = _el('button', { class: 'fp-library-item__add' }, '+ Add');
-      addBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this._engine.addFromLibrary(f.id);
+    for (const f of saved) {
+      const g = groups[f.kind];
+      if (g) g.filters.push(f);
+    }
+
+    for (const [kind, group] of Object.entries(groups)) {
+      if (group.filters.length === 0) continue;
+
+      // Sort within group alphabetically
+      group.filters.sort((a, b) => a.label.localeCompare(b.label));
+
+      const isCollapsed = this._collapsedLibraryCats.has(kind);
+      const section = _el('div', { class: 'fp-library-cat' });
+
+      // Collapsible header
+      const header = _el('div', { class: 'fp-library-cat__header' });
+      const arrow = _el('span', {
+        class: `fp-library-cat__arrow${isCollapsed ? '' : ' fp-library-cat__arrow--open'}`,
+      });
+      arrow.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><polyline points="9 18 15 12 9 6"/></svg>';
+      const catIcon = _el('span', { class: 'fp-library-cat__icon' });
+      catIcon.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14">${group.icon}</svg>`;
+      const catLabel = _el('span', { class: 'fp-library-cat__label' }, group.label);
+      const countBadge = _el('span', { class: 'fp-library-cat__count' }, String(group.filters.length));
+      header.append(arrow, catIcon, catLabel, countBadge);
+
+      header.addEventListener('click', () => {
+        if (this._collapsedLibraryCats.has(kind)) {
+          this._collapsedLibraryCats.delete(kind);
+        } else {
+          this._collapsedLibraryCats.add(kind);
+        }
         this.render();
       });
-      const delBtn = _el('button', { class: 'fp-library-item__del' }, '×');
-      delBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this._engine.removeSavedFilter(f.id);
-        this.render();
-      });
-      item.append(badge, name, addBtn, delBtn);
-      area.appendChild(item);
+
+      section.appendChild(header);
+
+      // Items list (hidden when collapsed)
+      if (!isCollapsed) {
+        const list = _el('div', { class: 'fp-library-cat__list' });
+        for (const f of group.filters) {
+          const item = _el('div', { class: 'fp-library-item' });
+          const badge = _el('span', {
+            class: `fp-library-item__badge fp-badge--${f.kind}`,
+          }, group.badge);
+          const name = _el('span', { class: 'fp-library-item__name' }, f.label);
+          const addBtn = _el('button', { class: 'fp-library-item__add' }, '+ Add');
+          addBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._engine.addFromLibrary(f.id);
+            this.render();
+          });
+          const delBtn = _el('button', { class: 'fp-library-item__del' }, '×');
+          delBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._engine.removeSavedFilter(f.id);
+            this.render();
+          });
+          item.append(badge, name, addBtn, delBtn);
+          list.appendChild(item);
+        }
+        section.appendChild(list);
+      }
+
+      area.appendChild(section);
     }
 
     return area;

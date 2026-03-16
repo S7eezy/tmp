@@ -4,3 +4,5 @@ export { ElasticClient } from './ElasticClient';
 export type { EsSearchOptions, EsSearchResponse, EsHit, EsIndexInfo } from './ElasticClient';
 export { GeoServerClient } from './GeoServerClient';
 export type { GeoServerLayerInfo } from './GeoServerClient';
+export { TileServerClient } from './TileServerClient';
+export type { TileServerTilesetInfo } from './TileServerClient';

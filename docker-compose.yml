@@ -49,7 +49,18 @@ services:
     networks:
       - ft-net
 
-  # ── Frontend (Vite dev server) ─────────────────────
+  # ── TileServer GL ─────────────────────────────────────
+  tileserver:
+    image: maptiler/tileserver-gl:latest
+    container_name: ft-tileserver
+    ports:
+      - "${TILESERVER_PORT}:8080"
+    volumes:
+      - ./tileserver:/data
+    networks:
+      - ft-net
+
+  # ── Frontend (nginx + static build) ──────────────────
   frontend:
     build:
       context: ./frontend
@@ -57,12 +68,6 @@ services:
     container_name: ft-frontend
     ports:
       - "${FRONTEND_PORT}:5173"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-    environment:
-      - VITE_ES_URL=http://elasticsearch:9200
-      - VITE_GEOSERVER_URL=http://geoserver:8080/geoserver
     depends_on:
       elasticsearch:
         condition: service_healthy

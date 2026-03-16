@@ -11,6 +11,7 @@ export default defineConfig(({ mode }) => {
   // the locally reachable addresses (e.g. http://localhost:9200).
   const esTarget = env.VITE_ES_URL ?? 'http://elasticsearch:9200';
   const geoserverTarget = env.VITE_GEOSERVER_URL ?? 'http://geoserver:8080/geoserver';
+  const tileserverTarget = env.VITE_TILESERVER_URL ?? 'http://tileserver:8080';
 
   return {
   resolve: {
@@ -33,6 +34,11 @@ export default defineConfig(({ mode }) => {
         target: geoserverTarget,
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/geoserver/, ''),
+      },
+      '/api/tiles': {
+        target: tileserverTarget,
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/tiles/, ''),
       },
     },
   },

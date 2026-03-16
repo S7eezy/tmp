@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import type { DeckLayerAdapter, LayerStyleConfig, LabelConfig } from '@core/layers';
-import { getIconsByCategory } from '@core/layers';
+import { getIconsByCategory, CATEGORY_LABELS } from '@core/layers';
 import type { LayerRegistry } from '@core/layers';
 import type { DataStore } from '@core/data';
 import type { ElasticClient } from '@core/data';
@@ -151,14 +151,16 @@ export class LayerStyleModal {
     const gridWrap = _el('div', 'lsm-icon-grid-wrap');
     const categories = getIconsByCategory();
 
+    let isFirst = true;
     for (const [cat, icons] of categories) {
       const catTitle = _el('div', 'lsm-icon-cat');
-      catTitle.textContent = cat.charAt(0).toUpperCase() + cat.slice(1);
+      catTitle.textContent = (CATEGORY_LABELS as Record<string, string>)[cat] ?? (cat.charAt(0).toUpperCase() + cat.slice(1));
       gridWrap.appendChild(catTitle);
 
       const grid = _el('div', 'lsm-icon-grid');
       // Add "none" option at start of first category
-      if (cat === 'vessel') {
+      if (isFirst) {
+        isFirst = false;
         const noneBtn = _el('button', `lsm-icon-btn${!style.icon ? ' lsm-icon-btn--active' : ''}`);
         noneBtn.title = 'Default (circle)';
         noneBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/></svg>';

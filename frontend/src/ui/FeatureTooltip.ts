@@ -38,7 +38,7 @@ export class FeatureTooltip {
       if (document.body.classList.contains('draw-mode')) return;
 
       if ((e.target as HTMLElement).closest(
-        '.side-panel, .filter-panel, .search-panel, .toolbar, .settings-overlay',
+        '.side-panel, .filter-panel, .search-dropdown, .toolbar, .settings-overlay',
       )) return;
 
       const point = { x: e.offsetX, y: e.offsetY };

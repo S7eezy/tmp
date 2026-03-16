@@ -130,64 +130,86 @@ export class DataConfigModal {
     info.textContent = 'Toggle which Elasticsearch indexes are visible in the DATA list:';
     bodyEl.appendChild(info);
 
+    // Search bar
+    const searchWrap = document.createElement('div');
+    searchWrap.className = 'settings-search-wrap';
+    const searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.className = 'settings-search';
+    searchInput.placeholder = 'Search indexes...';
+    searchWrap.appendChild(searchInput);
+    bodyEl.appendChild(searchWrap);
+
     // Index list
     const list = document.createElement('div');
     list.className = 'data-config-list';
 
-    if (this._allIndices.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'sp-empty';
-      empty.textContent = 'No Elasticsearch indexes found';
-      list.appendChild(empty);
-    }
+    const renderList = (filter: string) => {
+      list.innerHTML = '';
+      const q = filter.toLowerCase();
+      let matchCount = 0;
 
-    for (const idx of this._allIndices) {
-      const item = document.createElement('div');
-      item.className = 'data-config-item';
+      for (const idx of this._allIndices) {
+        if (q && !idx.index.toLowerCase().includes(q)) continue;
+        matchCount++;
 
-      const isVisible = !localHidden.has(idx.index);
+        const item = document.createElement('div');
+        item.className = 'data-config-item';
 
-      const toggle = document.createElement('div');
-      toggle.className = 'sp-row__toggle' + (isVisible ? ' sp-row__toggle--on' : '');
+        const isVisible = !localHidden.has(idx.index);
 
-      const nameSpan = document.createElement('span');
-      nameSpan.className = 'data-config-name';
-      nameSpan.textContent = idx.index;
+        const toggle = document.createElement('div');
+        toggle.className = 'sp-row__toggle' + (isVisible ? ' sp-row__toggle--on' : '');
 
-      const countSpan = document.createElement('span');
-      countSpan.className = 'data-config-count';
-      countSpan.textContent = fmtCount(idx.docsCount) + ' docs';
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'data-config-name';
+        nameSpan.textContent = idx.index;
 
-      // Show warning icon if index has no geo fields
-      const geoFields = this._geoFieldsCache.get(idx.index);
-      if (geoFields && geoFields.length === 0) {
-        const warn = document.createElement('span');
-        warn.className = 'data-config-warn';
-        warn.title = 'No compatible geo field – cannot be mapped';
-        warn.innerHTML = WARN_SVG;
-        item.append(toggle, nameSpan, warn, countSpan);
-      } else {
-        item.append(toggle, nameSpan, countSpan);
-      }
+        const countSpan = document.createElement('span');
+        countSpan.className = 'data-config-count';
+        countSpan.textContent = fmtCount(idx.docsCount) + ' docs';
 
-      item.addEventListener('click', () => {
-        if (localHidden.has(idx.index)) {
-          localHidden.delete(idx.index);
-          toggle.classList.add('sp-row__toggle--on');
-          item.classList.remove('data-config-item--off');
+        // Show warning icon if index has no geo fields
+        const geoFields = this._geoFieldsCache.get(idx.index);
+        if (geoFields && geoFields.length === 0) {
+          const warn = document.createElement('span');
+          warn.className = 'data-config-warn';
+          warn.title = 'No compatible geo field – cannot be mapped';
+          warn.innerHTML = WARN_SVG;
+          item.append(toggle, nameSpan, warn, countSpan);
         } else {
-          localHidden.add(idx.index);
-          toggle.classList.remove('sp-row__toggle--on');
+          item.append(toggle, nameSpan, countSpan);
+        }
+
+        item.addEventListener('click', () => {
+          if (localHidden.has(idx.index)) {
+            localHidden.delete(idx.index);
+            toggle.classList.add('sp-row__toggle--on');
+            item.classList.remove('data-config-item--off');
+          } else {
+            localHidden.add(idx.index);
+            toggle.classList.remove('sp-row__toggle--on');
+            item.classList.add('data-config-item--off');
+          }
+        });
+
+        if (!isVisible) {
           item.classList.add('data-config-item--off');
         }
-      });
 
-      if (!isVisible) {
-        item.classList.add('data-config-item--off');
+        list.appendChild(item);
       }
 
-      list.appendChild(item);
-    }
+      if (matchCount === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'sp-empty';
+        empty.textContent = q ? 'No matching indexes' : 'No Elasticsearch indexes found';
+        list.appendChild(empty);
+      }
+    };
+
+    searchInput.addEventListener('input', () => renderList(searchInput.value));
+    renderList('');
 
     bodyEl.appendChild(list);
 

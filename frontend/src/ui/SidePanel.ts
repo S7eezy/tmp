@@ -3,6 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import type { LayerRegistry, DeckLayerAdapter, WmsLayerAdapter, GeoType } from '@core/layers';
+import type { TileServerAdapter } from '@core/layers';
 import type { DataStore } from '@core/data';
 import { geoIcon, tileIcon } from './icons';
 
@@ -59,7 +60,7 @@ export class SidePanel {
     this._renderDataConfigButton();
   }
 
-  // ── Layers ──────────────────────────────────────────────────────────────
+  // ── Layers (GeoServer WMS) ─────────────────────────────────────────────
 
   private _renderLayers(): void {
     const body = document.getElementById('sp-layers-body');
@@ -67,68 +68,17 @@ export class SidePanel {
     if (!body || !countEl) return;
     body.innerHTML = '';
 
-    const deckLayers = this._reg.all().filter(
-      (l): l is DeckLayerAdapter => l.meta.kind === 'deck',
-    ) as DeckLayerAdapter[];
-    countEl.textContent = String(deckLayers.length);
-
-    if (deckLayers.length === 0) {
-      body.innerHTML = '<div class="sp-empty">No layers</div>';
-      return;
-    }
-
-    for (const layer of deckLayers) {
-      const isVisible = layer.meta.visible;
-      const layerId = layer.meta.id;
-
-      const row = document.createElement('div');
-      row.className = 'sp-row' + (isVisible ? '' : ' sp-row--off');
-
-      const toggle = document.createElement('div');
-      toggle.className = 'sp-row__toggle' + (isVisible ? ' sp-row__toggle--on' : '');
-
-      const iconWrap = document.createElement('div');
-      iconWrap.className = 'sp-row__icon';
-      const c = layer.color;
-      iconWrap.appendChild(geoIcon(layer.geoType, `rgb(${c[0]},${c[1]},${c[2]})`));
-
-      const label = document.createElement('span');
-      label.className = 'sp-row__label';
-      label.textContent = layer.meta.label;
-
-      const meta = document.createElement('span');
-      meta.className = 'sp-row__meta';
-      meta.textContent = fmtCount(layer.dataCount);
-
-      row.append(toggle, iconWrap, label, meta);
-
-      // Single click handler on the row — toggles visibility
-      row.addEventListener('click', () => {
-        this._reg.setVisible(layerId, !this._reg.get(layerId)!.meta.visible);
-      });
-      body.appendChild(row);
-    }
-  }
-
-  // ── Tiles ───────────────────────────────────────────────────────────────
-
-  private _renderTiles(): void {
-    const body = document.getElementById('sp-tiles-body');
-    const countEl = document.getElementById('sp-tiles-count');
-    if (!body || !countEl) return;
-    body.innerHTML = '';
-
-    const tileLayers = this._reg.all().filter(
+    const wmsLayers = this._reg.all().filter(
       (l): l is WmsLayerAdapter => l.meta.kind === 'maplibre',
     ) as WmsLayerAdapter[];
-    countEl.textContent = String(tileLayers.length);
+    countEl.textContent = String(wmsLayers.length);
 
-    if (tileLayers.length === 0) {
-      body.innerHTML = '<div class="sp-empty">No tile layers</div>';
+    if (wmsLayers.length === 0) {
+      body.innerHTML = '<div class="sp-empty">No GeoServer layers</div>';
       return;
     }
 
-    for (const layer of tileLayers) {
+    for (const layer of wmsLayers) {
       const isVisible = layer.meta.visible;
       const layerId = layer.meta.id;
 
@@ -152,7 +102,56 @@ export class SidePanel {
 
       row.append(toggle, iconWrap, label, meta);
 
-      // Single click handler on the row — toggles visibility
+      row.addEventListener('click', () => {
+        this._reg.setVisible(layerId, !this._reg.get(layerId)!.meta.visible);
+      });
+      body.appendChild(row);
+    }
+  }
+
+  // ── Tiles (TileServer GL) ───────────────────────────────────────────────
+
+  private _renderTiles(): void {
+    const body = document.getElementById('sp-tiles-body');
+    const countEl = document.getElementById('sp-tiles-count');
+    if (!body || !countEl) return;
+    body.innerHTML = '';
+
+    const tileLayers = this._reg.all().filter(
+      (l): l is TileServerAdapter => l.meta.kind === 'tileserver',
+    ) as TileServerAdapter[];
+    countEl.textContent = String(tileLayers.length);
+
+    if (tileLayers.length === 0) {
+      body.innerHTML = '<div class="sp-empty">No tile layers</div>';
+      return;
+    }
+
+    for (const layer of tileLayers) {
+      const isVisible = layer.meta.visible;
+      const layerId = layer.meta.id;
+
+      const row = document.createElement('div');
+      row.className = 'sp-row' + (isVisible ? '' : ' sp-row--off');
+
+      const toggle = document.createElement('div');
+      toggle.className = 'sp-row__toggle' + (isVisible ? ' sp-row__toggle--on' : '');
+
+      const iconWrap = document.createElement('div');
+      iconWrap.className = 'sp-row__icon';
+      const tileKind = layer.isVector ? 'vector' as const : 'raster' as const;
+      iconWrap.appendChild(tileIcon(tileKind, 'var(--ft-accent)'));
+
+      const label = document.createElement('span');
+      label.className = 'sp-row__label';
+      label.textContent = layer.meta.label;
+
+      const meta = document.createElement('span');
+      meta.className = 'sp-row__meta';
+      meta.textContent = `${layer.format} · z${layer.minZoom}–${layer.maxZoom}`;
+
+      row.append(toggle, iconWrap, label, meta);
+
       row.addEventListener('click', () => {
         this._reg.setVisible(layerId, !this._reg.get(layerId)!.meta.visible);
       });

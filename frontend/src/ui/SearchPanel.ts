@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// SearchPanel – full-text search across all data sources.
+// SearchPanel – full-text search across all data sources (dropdown UI).
 // ---------------------------------------------------------------------------
 
 import type { MapEngine } from '@core/map';

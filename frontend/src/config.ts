@@ -11,6 +11,10 @@ export const Config = {
   geoserverBaseUrl:
     import.meta.env.VITE_GEOSERVER_BASE_URL ?? '/api/geoserver',
 
+  /** TileServer GL proxy base. */
+  tileserverBaseUrl:
+    import.meta.env.VITE_TILESERVER_BASE_URL ?? '/api/tiles',
+
   /** Default centre [lng, lat] – Atlantic, shows both Americas and Europe. */
   defaultCenter: [0, 30] as [number, number],
 

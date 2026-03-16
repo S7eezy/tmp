@@ -187,6 +187,81 @@ export class MapEngine {
     }
   }
 
+  /**
+   * Add a raster tile source + layer to MapLibre (e.g. from TileServer GL).
+   */
+  addRasterTileLayer(
+    id: string,
+    tiles: string[],
+    options: { tileSize?: number; minzoom?: number; maxzoom?: number; opacity?: number; beforeId?: string } = {},
+  ): void {
+    if (!this._map.getSource(id)) {
+      this._map.addSource(id, {
+        type: 'raster',
+        tiles,
+        tileSize: options.tileSize ?? 256,
+        minzoom: options.minzoom ?? 0,
+        maxzoom: options.maxzoom ?? 22,
+      });
+    }
+    if (!this._map.getLayer(id)) {
+      this._map.addLayer(
+        {
+          id,
+          type: 'raster',
+          source: id,
+          paint: { 'raster-opacity': options.opacity ?? 1 },
+        },
+        options.beforeId,
+      );
+    }
+  }
+
+  /**
+   * Add a vector tile source + a basic circle layer for point features.
+   * The source can later be used with additional style layers if needed.
+   */
+  addVectorTileLayer(
+    id: string,
+    tiles: string[],
+    options: { minzoom?: number; maxzoom?: number; opacity?: number; beforeId?: string } = {},
+  ): void {
+    if (!this._map.getSource(id)) {
+      this._map.addSource(id, {
+        type: 'vector',
+        tiles,
+        minzoom: options.minzoom ?? 0,
+        maxzoom: options.maxzoom ?? 22,
+      });
+    }
+    // Add a generic circle layer for any source layer in the vector tiles
+    if (!this._map.getLayer(id)) {
+      this._map.addLayer(
+        {
+          id,
+          type: 'circle',
+          source: id,
+          'source-layer': '',
+          paint: {
+            'circle-radius': 4,
+            'circle-color': '#3b82f6',
+            'circle-opacity': options.opacity ?? 0.8,
+          },
+        },
+        options.beforeId,
+      );
+    }
+  }
+
+  /**
+   * Remove any MapLibre source + its layer(s) by id.
+   * Works for WMS, raster tiles, and vector tiles alike.
+   */
+  removeTileLayer(id: string): void {
+    if (this._map.getLayer(id)) this._map.removeLayer(id);
+    if (this._map.getSource(id)) this._map.removeSource(id);
+  }
+
   /** Remove a MapLibre-managed WMS layer + source. */
   removeWmsLayer(id: string): void {
     if (this._map.getLayer(id)) this._map.removeLayer(id);

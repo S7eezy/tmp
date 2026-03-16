@@ -8,9 +8,9 @@
 import './style.css';
 
 import { MapEngine } from '@core/map';
-import { LayerRegistry, DeckLayerAdapter, WmsLayerAdapter, preloadIcons } from '@core/layers';
-import type { GeoType } from '@core/layers';
-import { DataStore, ElasticClient, GeoServerClient } from '@core/data';
+import { LayerRegistry, DeckLayerAdapter, WmsLayerAdapter, TileServerAdapter, preloadIcons } from '@core/layers';
+import type { GeoType, TileFormat } from '@core/layers';
+import { DataStore, ElasticClient, GeoServerClient, TileServerClient } from '@core/data';
 import type { EsIndexInfo } from '@core/data';
 import { Config } from './config';
 import { FilterEngine, FilterPanel } from '@filters';
@@ -175,6 +175,32 @@ async function boot(): Promise<void> {
     demoWms.attach(engine);
   }
 
+  // ── 5b. Discover TileServer GL tilesets ─────────────────────────────────
+  const tileServerClient = new TileServerClient();
+  try {
+    const tilesets = await tileServerClient.listTiles();
+    console.log(`[FleetTracker] TileServer: discovered ${tilesets.length} tilesets`);
+
+    for (const ts of tilesets) {
+      const id = `ts-${ts.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+      const adapter = new TileServerAdapter({
+        id,
+        label: ts.name || ts.id,
+        tiles: ts.tiles,
+        format: ts.format as TileFormat,
+        minZoom: ts.minzoom,
+        maxZoom: ts.maxzoom,
+        visible: false,
+        zIndex: -2,
+      });
+      layerRegistry.add(adapter);
+      adapter.attach(engine);
+    }
+  } catch (err) {
+    console.warn('[FleetTracker] Could not connect to TileServer:', err);
+    console.log('[FleetTracker] Running without TileServer tiles.');
+  }
+
   // ── 6. UI components ───────────────────────────────────────────────────
   const settingsModal = new SettingsModal(dataStore, rawData);
   const hud           = new Hud(engine, dataStore);
@@ -248,6 +274,7 @@ async function boot(): Promise<void> {
   toolbar.setup();
   toolbar.setupNotches();
   toolbar.setupSectionToggles();
+  toolbar.setupMapClickClose();
   hud.setupCoords();
   hud.setupCursorTooltip();
   drawMode.setupEvents();

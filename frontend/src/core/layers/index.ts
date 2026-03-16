@@ -1,10 +1,12 @@
 export { LayerRegistry } from './LayerRegistry';
 export { DeckLayerAdapter, preloadIcons } from './DeckLayer';
 export { WmsLayerAdapter } from './WmsLayer';
+export { TileServerAdapter } from './TileServerAdapter';
 export type { BaseLayer, LayerMeta, LayerKind } from './BaseLayer';
 export type { GeoType, DeckLayerOptions } from './DeckLayer';
 export type { WmsLayerOptions, TileKind } from './WmsLayer';
-export { ICON_LIBRARY, getIconDef, getIconsByCategory, iconToDataUrl, buildIconAtlasAsync } from './IconLibrary';
-export type { IconDef } from './IconLibrary';
+export type { TileServerAdapterOptions, TileFormat } from './TileServerAdapter';
+export { ICON_LIBRARY, getIconDef, getIconsByCategory, iconToDataUrl, buildIconAtlasAsync, CATEGORY_LABELS, CATEGORY_ORDER } from './IconLibrary';
+export type { IconDef, IconCategory } from './IconLibrary';
 export { loadLayerStyles, saveLayerStyles, CATEGORICAL_PALETTE, lerpColor } from './LayerStyleConfig';
 export type { LayerStyleConfig, ColorConfig, OrientationConfig, LabelConfig } from './LayerStyleConfig';
