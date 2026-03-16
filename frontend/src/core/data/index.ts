@@ -5,4 +5,4 @@ export type { EsSearchOptions, EsSearchResponse, EsHit, EsIndexInfo } from './El
 export { GeoServerClient } from './GeoServerClient';
 export type { GeoServerLayerInfo } from './GeoServerClient';
 export { TileServerClient } from './TileServerClient';
-export type { TileServerTilesetInfo } from './TileServerClient';
+export type { TileServerTilesetInfo, TileServerStyleInfo } from './TileServerClient';

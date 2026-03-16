@@ -2,7 +2,8 @@
 // FleetTracker – Entry point
 //
 // Slim boot sequence: initialises the map engine, discovers Elasticsearch
-// indices, loads data, and wires up all UI components.
+// indices (metadata only), and wires up all UI components.
+// Data is loaded on-demand when the user toggles an index in the DATA panel.
 // ---------------------------------------------------------------------------
 
 import './style.css';
@@ -14,7 +15,7 @@ import { DataStore, ElasticClient, GeoServerClient, TileServerClient } from '@co
 import type { EsIndexInfo } from '@core/data';
 import { Config } from './config';
 import { FilterEngine, FilterPanel } from '@filters';
-import { Toolbar, SidePanel, SettingsModal, DataConfigModal, LayerStyleModal, FeatureTooltip, DrawMode, SearchPanel, Hud } from '@ui';
+import { Toolbar, SidePanel, SettingsModal, DataConfigModal, LayerStyleModal, FeatureTooltip, DrawMode, SearchPanel, Hud, showToast } from '@ui';
 import type { Feature } from 'geojson';
 
 // ---------------------------------------------------------------------------
@@ -28,6 +29,12 @@ function debounce<F extends (...args: Parameters<F>) => void>(fn: F, ms: number)
     clearTimeout(timer);
     timer = setTimeout(() => fn(...args), ms);
   }) as F;
+}
+
+function fmtCount(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k';
+  return String(n);
 }
 
 // ---------------------------------------------------------------------------
@@ -53,7 +60,7 @@ async function boot(): Promise<void> {
   // ── 1. Core singletons ──────────────────────────────────────────────────
   const dataStore       = new DataStore();
   const rawData         = new Map<string, Feature[]>();
-  /** Geo field names per index — populated at boot, reused by the filter handler. */
+  /** Geo field names per index — populated lazily, reused by the filter handler. */
   const geoFieldsCache  = new Map<string, string[]>();
   const layerRegistry   = new LayerRegistry();
   const filterEngine  = new FilterEngine();
@@ -64,7 +71,7 @@ async function boot(): Promise<void> {
   await Promise.all([engine.whenReady(), preloadIcons()]);
   console.log('[FleetTracker] Map ready, icons preloaded');
 
-  // ── 3. Load Elasticsearch indices ───────────────────────────────────────
+  // ── 3. Discover ES index METADATA only (no data loaded) ─────────────────
   let indices: EsIndexInfo[] = [];
   try {
     indices = await esClient.listIndices();
@@ -74,62 +81,17 @@ async function boot(): Promise<void> {
     console.log('[FleetTracker] Running with empty data – add ES indices and reload.');
   }
 
-  // ── 4. For each index, detect geo field → load data → create layer ─────
-  // All indices are loaded concurrently; color is assigned by stable list position.
+  // ── 4. Detect geo fields for all indices (lightweight mapping reads) ────
   const t0 = performance.now();
-
-  await Promise.all(indices.map(async (info, colorIdx) => {
+  await Promise.all(indices.map(async (info) => {
     try {
-      // Detect geo fields in this index and cache them for the filter handler
       const geoFields = await esClient.detectGeoFields(info.index);
       geoFieldsCache.set(info.index, geoFields);
-      if (geoFields.length === 0) {
-        console.log(`[FleetTracker] Index "${info.index}" has no geo fields – skipping layer, but listing in Data panel.`);
-        // Still load a sample for the data panel / filters
-        const resp = await esClient.search({ index: info.index, size: 100 });
-        const features: Feature[] = resp.hits.hits.map(hit => ({
-          type: 'Feature' as const,
-          geometry: { type: 'Point' as const, coordinates: [0, 0] },
-          properties: { _id: hit._id, ...hit._source },
-        }));
-        rawData.set(info.index, features);
-        dataStore.set(info.index, features);
-        return;
-      }
-
-      const geoField = geoFields[0]; // Use the first geo field
-      const geoType = await esClient.detectGeoType(info.index, geoField) ?? 'point';
-
-      // Fetch data as GeoJSON
-      const features = await esClient.searchAsGeoJSON({
-        index: info.index,
-        geoField,
-      });
-
-      console.log(`[FleetTracker] Index "${info.index}": ${features.length} features (${geoType}, field: ${geoField})`);
-
-      rawData.set(info.index, features);
-      dataStore.set(info.index, features);
-
-      // Create a deck.gl layer
-      const color = PALETTE[colorIdx % PALETTE.length];
-      const zIndex = geoType === 'point' ? 10 : geoType === 'line' ? 5 : 1;
-      const layer = new DeckLayerAdapter({
-        id: info.index,
-        label: info.index,
-        geoType: geoType as GeoType,
-        data: features,
-        color,
-        esIndex: info.index,
-        zIndex,
-      });
-      layerRegistry.add(layer);
-    } catch (err) {
-      console.error(`[FleetTracker] Failed to load index "${info.index}":`, err);
+    } catch {
+      // Skip – mapping might be inaccessible
     }
   }));
-
-  console.log(`[FleetTracker] Loaded ${dataStore.totalFeatures()} features from ${indices.length} indices in ${(performance.now() - t0).toFixed(1)}ms`);
+  console.log(`[FleetTracker] Detected geo fields for ${geoFieldsCache.size} indices in ${(performance.now() - t0).toFixed(1)}ms`);
 
   // ── 5. Discover GeoServer layers & tiles ────────────────────────────────
   const geoServerClient = new GeoServerClient();
@@ -175,11 +137,16 @@ async function boot(): Promise<void> {
     demoWms.attach(engine);
   }
 
-  // ── 5b. Discover TileServer GL tilesets ─────────────────────────────────
+  // ── 5b. Discover TileServer GL tilesets & styles ───────────────────────
   const tileServerClient = new TileServerClient();
+  /** Available basemap styles from TileServer GL. */
+  let mapStyles: import('./ui/SidePanel').MapStyleEntry[] = [];
   try {
-    const tilesets = await tileServerClient.listTiles();
-    console.log(`[FleetTracker] TileServer: discovered ${tilesets.length} tilesets`);
+    const [tilesets, styleInfos] = await Promise.all([
+      tileServerClient.listTiles(),
+      tileServerClient.listStyles(),
+    ]);
+    console.log(`[FleetTracker] TileServer: discovered ${tilesets.length} tilesets, ${styleInfos.length} styles`);
 
     for (const ts of tilesets) {
       const id = `ts-${ts.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
@@ -196,6 +163,9 @@ async function boot(): Promise<void> {
       layerRegistry.add(adapter);
       adapter.attach(engine);
     }
+
+    // Convert style infos → MapStyleEntry for the side panel
+    mapStyles = styleInfos.map(s => ({ id: s.id, name: s.name, url: s.url }));
   } catch (err) {
     console.warn('[FleetTracker] Could not connect to TileServer:', err);
     console.log('[FleetTracker] Running without TileServer tiles.');
@@ -206,21 +176,21 @@ async function boot(): Promise<void> {
   const hud           = new Hud(engine, dataStore);
   const toolbar       = new Toolbar(filterEngine);
 
-  // Data config modal: manages which ES indexes are visible in the DATA panel
+  // Data config modal: manages which ES indexes are enabled in the DATA panel
   const dataConfigModal = new DataConfigModal({
     esClient,
-    hiddenIndexes: new Set(),
+    enabledIndexes: new Set(),
     geoFieldsCache,
-    onSave: (hidden) => {
-      sidePanel.setHiddenIndexes(hidden);
+    onSave: (enabled) => {
+      sidePanel.setEnabledIndexes(enabled);
       sidePanel.render();
     },
   });
   dataConfigModal.setIndices(indices);
 
   // Load saved data visibility config from ES
-  dataConfigModal.loadConfig().then(hidden => {
-    sidePanel.setHiddenIndexes(hidden);
+  dataConfigModal.loadConfig().then(enabled => {
+    sidePanel.setEnabledIndexes(enabled);
     sidePanel.render();
   }).catch(() => { /* ignore – config not yet saved */ });
 
@@ -241,7 +211,29 @@ async function boot(): Promise<void> {
     onOpenDataConfig: () => dataConfigModal.open(),
     onOpenStyleEditor: (id: string) => layerStyleModal.open(id),
     geoFieldsCache,
+    onSwitchMapStyle: (style) => {
+      console.log(`[FleetTracker] Switching basemap to "${style.name}" (${style.url})`);
+      engine.map.setStyle(style.url);
+      // After style loads, re-attach all MapLibre-managed layers (WMS + tileserver)
+      engine.map.once('style.load', () => {
+        for (const layer of layerRegistry.all()) {
+          if (layer.meta.kind === 'maplibre' || layer.meta.kind === 'tileserver') {
+            (layer as WmsLayerAdapter | TileServerAdapter).attach(engine);
+          }
+        }
+      });
+    },
+    onToggleData: (indexId, loadRequested) => {
+      if (loadRequested) loadIndex(indexId);
+      else unloadIndex(indexId);
+    },
   });
+  // Feed index metadata for doc counts on unloaded rows
+  sidePanel.setIndexMetadata(indices);
+  // Feed discovered TileServer styles into the side panel
+  if (mapStyles.length > 0) {
+    sidePanel.setMapStyles(mapStyles, Config.mapStyleName ?? null);
+  }
   const featureTooltip = new FeatureTooltip(engine, dataStore, settingsModal);
   const drawMode       = new DrawMode(engine, () => filterPanel);
   const searchPanel    = new SearchPanel(engine, dataStore, featureTooltip);
@@ -357,7 +349,99 @@ async function boot(): Promise<void> {
     filterPanel.render();
   }).catch(() => { /* config not yet saved */ });
 
-  // ── 13. Expose globals for debugging ───────────────────────────────────
+  // ── 13. On-demand data loading / unloading ─────────────────────────────
+
+  /** Load data for a single ES index on demand. */
+  async function loadIndex(indexId: string): Promise<void> {
+    sidePanel.setLoading(indexId, true);
+    sidePanel.render();
+
+    try {
+      // Pre-flight count check (with active filters if any)
+      const activeFilters = filterEngine.getFiltersForIndex(indexId);
+      const query = activeFilters.length > 0
+        ? filterEngine.buildQuery(indexId)
+        : undefined;
+      const count = await esClient.count(indexId, query);
+
+      if (count > 10_000) {
+        showToast(
+          `"${indexId}" has ${fmtCount(count)} docs — please add filters to reduce the dataset before loading.`,
+          'warning',
+          5000,
+        );
+        sidePanel.setLoading(indexId, false);
+        sidePanel.render();
+        return;
+      }
+
+      // Detect geo fields (use cache if available)
+      const geoFields = geoFieldsCache.get(indexId)
+        ?? await esClient.detectGeoFields(indexId);
+      geoFieldsCache.set(indexId, geoFields);
+
+      if (geoFields.length === 0) {
+        // No geo field — load sample for data panel / filters only
+        console.log(`[FleetTracker] Index "${indexId}" has no geo fields – loading sample only.`);
+        const resp = await esClient.search({ index: indexId, query, size: 100 });
+        const features: Feature[] = resp.hits.hits.map(hit => ({
+          type: 'Feature' as const,
+          geometry: { type: 'Point' as const, coordinates: [0, 0] },
+          properties: { _id: hit._id, ...hit._source },
+        }));
+        rawData.set(indexId, features);
+        dataStore.set(indexId, features);
+      } else {
+        const geoField = geoFields[0];
+        const geoType = await esClient.detectGeoType(indexId, geoField) ?? 'point';
+
+        const features = await esClient.searchAsGeoJSON({
+          index: indexId,
+          geoField,
+          query,
+        });
+        console.log(`[FleetTracker] Loaded "${indexId}": ${features.length} features (${geoType}, field: ${geoField})`);
+
+        rawData.set(indexId, features);
+        dataStore.set(indexId, features);
+
+        // Create deck.gl layer
+        const colorIdx = indices.findIndex(i => i.index === indexId);
+        const color = PALETTE[(colorIdx >= 0 ? colorIdx : 0) % PALETTE.length];
+        const zIndex = geoType === 'point' ? 10 : geoType === 'line' ? 5 : 1;
+        const layer = new DeckLayerAdapter({
+          id: indexId,
+          label: indexId,
+          geoType: geoType as GeoType,
+          data: features,
+          color,
+          esIndex: indexId,
+          zIndex,
+        });
+        layerRegistry.add(layer);
+
+        // Apply saved layer style if available
+        layerStyleModal.applyStyleFor(indexId);
+      }
+    } catch (err) {
+      console.error(`[FleetTracker] Failed to load "${indexId}":`, err);
+      showToast(`Failed to load "${indexId}"`, 'error');
+    } finally {
+      sidePanel.setLoading(indexId, false);
+      sidePanel.render();
+    }
+  }
+
+  /** Completely unload data and layer for an index. */
+  function unloadIndex(indexId: string): void {
+    rawData.delete(indexId);
+    dataStore.remove(indexId);      // emits data-change with count 0
+    layerRegistry.remove(indexId);  // calls dispose() + emits change
+    sidePanel.render();
+    console.log(`[FleetTracker] Unloaded "${indexId}"`);
+  }
+
+  // ── 14. Expose globals for debugging ───────────────────────────────────
   Object.assign(window, { ft: { engine, layerRegistry, dataStore, filterEngine, esClient } });
 
   console.log('[FleetTracker] Boot complete');

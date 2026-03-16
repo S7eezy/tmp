@@ -45,6 +45,17 @@ export class LayerStyleModal {
     this._onStyleChange();
   }
 
+  /** Apply a previously-saved style to a single layer (if one exists). */
+  applyStyleFor(layerId: string): void {
+    const style = this._styles.get(layerId);
+    if (!style) return;
+    const layer = this._reg.get<DeckLayerAdapter>(layerId);
+    if (layer && 'setStyle' in layer) {
+      (layer as DeckLayerAdapter).setStyle(style);
+      this._onStyleChange();
+    }
+  }
+
   /** Open the style editor for a specific layer. */
   open(layerId: string): void {
     const layer = this._reg.get<DeckLayerAdapter>(layerId);

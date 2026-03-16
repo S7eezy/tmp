@@ -383,11 +383,17 @@ export class DeckLayerAdapter implements BaseLayer {
     const iconDef = getIconDef(name);
     if (!iconDef) return this._buildScatterplot(false); // fallback
 
-    // Build a single-icon atlas: 1×1 canvas
     const atlasSize = Math.max(48, iconSize * 2);
-    const dataUrl = iconToDataUrl(iconDef, atlasSize, '#ffffff', 1.5);
-
     const extensions = [new DataFilterExtension({ filterSize: 1 })];
+
+    // When a per-feature color accessor exists, render a white SVG and use
+    // deck.gl's icon masking so getColor can tint each icon individually.
+    // Otherwise bake the layer's static color directly into the SVG.
+    const hasColorAccessor = !!this._colorAccessor;
+    const svgColor = hasColorAccessor
+      ? '#ffffff'
+      : `rgb(${this.color[0]},${this.color[1]},${this.color[2]})`;
+    const dataUrl = iconToDataUrl(iconDef, atlasSize, svgColor, 1.5);
 
     return new IconLayer({
       id: `${this.meta.id}-icon`,
@@ -397,7 +403,11 @@ export class DeckLayerAdapter implements BaseLayer {
         url: dataUrl,
         width: atlasSize,
         height: atlasSize,
+        mask: hasColorAccessor,
       }),
+      getColor: hasColorAccessor
+        ? ((d: PointFeature) => this._getColor(d))
+        : [255, 255, 255, 255],
       getSize: iconSize,
       sizeUnits: 'pixels',
       getAngle: (d: PointFeature) => -this._getAngle(d),
@@ -409,7 +419,8 @@ export class DeckLayerAdapter implements BaseLayer {
       filterRange: this._filterRange,
       updateTriggers: {
         getFilterValue: [this._filterRange],
-        getIcon: [this._style?.icon],
+        getIcon: [this._style?.icon, this._style?.color, this.color],
+        getColor: [this._style?.color, this.color],
         getSize: [this._style?.iconSize],
         getAngle: [this._style?.orientation],
       },

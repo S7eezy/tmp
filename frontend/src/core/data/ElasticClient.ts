@@ -56,14 +56,25 @@ export interface EsIndexInfo {
 
 export class ElasticClient {
   private _base: string;
+  private _apiKey: string | undefined;
 
-  constructor(baseUrl = Config.esBaseUrl) {
+  constructor(baseUrl = Config.esBaseUrl, apiKey = Config.esApiKey) {
     this._base = baseUrl.replace(/\/$/, '');
+    this._apiKey = apiKey;
   }
 
   /** Public accessor for the base URL. */
   get baseUrl(): string {
     return this._base;
+  }
+
+  /** Build common headers, including Authorization when an API key is set. */
+  headers(extra?: Record<string, string>): Record<string, string> {
+    const h: Record<string, string> = { ...extra };
+    if (this._apiKey) {
+      h['Authorization'] = `ApiKey ${this._apiKey}`;
+    }
+    return h;
   }
 
   // -- Raw search ---------------------------------------------------------
@@ -80,7 +91,7 @@ export class ElasticClient {
 
     const res = await fetch(`${this._base}/${index}/_search`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.headers({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
       signal,
     });
@@ -89,6 +100,31 @@ export class ElasticClient {
       throw new Error(`ES search failed: ${res.status} ${await res.text()}`);
     }
     return res.json();
+  }
+
+  // -- Count --------------------------------------------------------------
+
+  /**
+   * Lightweight document count (uses _count endpoint).
+   * Accepts an optional query so the count respects active filters.
+   */
+  async count(
+    index: string,
+    query?: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<number> {
+    const body: Record<string, unknown> = {
+      query: query ?? { match_all: {} },
+    };
+    const res = await fetch(`${this._base}/${index}/_count`, {
+      method: 'POST',
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!res.ok) throw new Error(`ES count failed: ${res.status}`);
+    const json = await res.json();
+    return json.count as number;
   }
 
   // -- GeoJSON helper -----------------------------------------------------
@@ -166,7 +202,7 @@ export class ElasticClient {
 
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.headers({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
     });
     if (!res.ok) {
@@ -182,7 +218,9 @@ export class ElasticClient {
    * Returns an array of { index, docsCount, geoFields } objects.
    */
   async listIndices(): Promise<EsIndexInfo[]> {
-    const res = await fetch(`${this._base}/_cat/indices?format=json&h=index,docs.count,health,status`);
+    const res = await fetch(`${this._base}/_cat/indices?format=json&h=index,docs.count,health,status`, {
+      headers: this.headers(),
+    });
     if (!res.ok) throw new Error(`ES _cat/indices failed: ${res.status}`);
     const rows: Array<{ index: string; 'docs.count': string; health: string; status: string }> = await res.json();
 
@@ -244,7 +282,10 @@ export class ElasticClient {
     index: string,
     signal?: AbortSignal,
   ): Promise<Record<string, { type: string; fields?: Record<string, unknown> }>> {
-    const res = await fetch(`${this._base}/${index}/_mapping`, { signal });
+    const res = await fetch(`${this._base}/${index}/_mapping`, {
+      headers: this.headers(),
+      signal,
+    });
     if (!res.ok) throw new Error(`ES mapping failed: ${res.status}`);
     const json = await res.json();
     const firstIndex = Object.keys(json)[0];

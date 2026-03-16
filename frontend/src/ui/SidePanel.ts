@@ -4,8 +4,17 @@
 
 import type { LayerRegistry, DeckLayerAdapter, WmsLayerAdapter, GeoType } from '@core/layers';
 import type { TileServerAdapter } from '@core/layers';
-import type { DataStore } from '@core/data';
+import type { DataStore, EsIndexInfo } from '@core/data';
 import { geoIcon, tileIcon } from './icons';
+
+export interface MapStyleEntry {
+  /** Style id (e.g. 'leviathan'). */
+  id: string;
+  /** Human-readable name. */
+  name: string;
+  /** Full style.json URL. */
+  url: string;
+}
 
 export interface SidePanelDeps {
   layerRegistry: LayerRegistry;
@@ -15,10 +24,14 @@ export interface SidePanelDeps {
   onOpenStyleEditor: (sourceId: string) => void;
   /** Map of index → geo field names (empty array means no geo fields). */
   geoFieldsCache?: Map<string, string[]>;
+  /** Callback when the user selects a different basemap style. */
+  onSwitchMapStyle?: (style: MapStyleEntry) => void;
+  /** Callback when the user toggles a DATA index on (load) or off (unload). */
+  onToggleData?: (indexId: string, load: boolean) => void;
 }
 
-/** Set of index names that are hidden from the DATA list. */
-export type HiddenIndexes = Set<string>;
+/** Set of index names that are enabled in the DATA list. */
+export type EnabledIndexes = Set<string>;
 
 function fmtCount(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
@@ -32,8 +45,21 @@ export class SidePanel {
   private _onOpenSettings: (sourceId: string) => void;
   private _onOpenDataConfig: () => void;
   private _onOpenStyleEditor: (sourceId: string) => void;
-  private _hiddenIndexes: HiddenIndexes = new Set();
+  private _onSwitchMapStyle: ((style: MapStyleEntry) => void) | null;
+  private _onToggleData: ((indexId: string, load: boolean) => void) | null;
   private _geoFieldsCache: Map<string, string[]>;
+
+  /** Indexes that are enabled (shown) in the DATA panel — set by Configure modal. */
+  private _enabledIndexes: EnabledIndexes = new Set();
+  /** Indexes that are currently loading data from ES. */
+  private _loadingIndexes: Set<string> = new Set();
+  /** Index metadata from listIndices() — used for doc counts on unloaded rows. */
+  private _indexMetadata: Map<string, EsIndexInfo> = new Map();
+
+  /** Available basemap styles from TileServer GL. */
+  private _mapStyles: MapStyleEntry[] = [];
+  /** Currently active style id. */
+  private _activeStyleId: string | null = null;
 
   constructor(deps: SidePanelDeps) {
     this._reg = deps.layerRegistry;
@@ -41,17 +67,41 @@ export class SidePanel {
     this._onOpenSettings = deps.onOpenSettings;
     this._onOpenDataConfig = deps.onOpenDataConfig;
     this._onOpenStyleEditor = deps.onOpenStyleEditor;
+    this._onSwitchMapStyle = deps.onSwitchMapStyle ?? null;
+    this._onToggleData = deps.onToggleData ?? null;
     this._geoFieldsCache = deps.geoFieldsCache ?? new Map();
   }
 
-  /** Update the set of hidden indexes (from ES config). */
-  setHiddenIndexes(hidden: HiddenIndexes): void {
-    this._hiddenIndexes = hidden;
+  // -- Public setters -----------------------------------------------------
+
+  /** Update the set of enabled indexes (from ES config). */
+  setEnabledIndexes(enabled: EnabledIndexes): void {
+    this._enabledIndexes = enabled;
   }
 
-  get hiddenIndexes(): HiddenIndexes {
-    return this._hiddenIndexes;
+  get enabledIndexes(): EnabledIndexes {
+    return this._enabledIndexes;
   }
+
+  /** Feed index metadata from listIndices() for doc counts on unloaded rows. */
+  setIndexMetadata(indices: EsIndexInfo[]): void {
+    this._indexMetadata.clear();
+    for (const info of indices) this._indexMetadata.set(info.index, info);
+  }
+
+  /** Mark an index as loading or finished loading. */
+  setLoading(indexId: string, loading: boolean): void {
+    if (loading) this._loadingIndexes.add(indexId);
+    else this._loadingIndexes.delete(indexId);
+  }
+
+  /** Set the list of available basemap styles and which one is active. */
+  setMapStyles(styles: MapStyleEntry[], activeId: string | null): void {
+    this._mapStyles = styles;
+    this._activeStyleId = activeId;
+  }
+
+  // -- Render -------------------------------------------------------------
 
   render(): void {
     this._renderLayers();
@@ -109,7 +159,7 @@ export class SidePanel {
     }
   }
 
-  // ── Tiles (TileServer GL) ───────────────────────────────────────────────
+  // ── Tiles (TileServer GL data + styles) ────────────────────────────────
 
   private _renderTiles(): void {
     const body = document.getElementById('sp-tiles-body');
@@ -120,13 +170,51 @@ export class SidePanel {
     const tileLayers = this._reg.all().filter(
       (l): l is TileServerAdapter => l.meta.kind === 'tileserver',
     ) as TileServerAdapter[];
-    countEl.textContent = String(tileLayers.length);
 
-    if (tileLayers.length === 0) {
+    const totalCount = this._mapStyles.length + tileLayers.length;
+    countEl.textContent = String(totalCount);
+
+    if (totalCount === 0) {
       body.innerHTML = '<div class="sp-empty">No tile layers</div>';
       return;
     }
 
+    // ── Basemap styles (radio-button: only one active at a time) ──────────
+    if (this._mapStyles.length > 0) {
+      for (const style of this._mapStyles) {
+        const isActive = style.id === this._activeStyleId;
+
+        const row = document.createElement('div');
+        row.className = 'sp-row' + (isActive ? '' : ' sp-row--off');
+
+        const toggle = document.createElement('div');
+        toggle.className = 'sp-row__toggle' + (isActive ? ' sp-row__toggle--on' : '');
+
+        const iconWrap = document.createElement('div');
+        iconWrap.className = 'sp-row__icon';
+        iconWrap.appendChild(tileIcon('raster', 'var(--ft-accent)'));
+
+        const label = document.createElement('span');
+        label.className = 'sp-row__label';
+        label.textContent = style.name;
+
+        const meta = document.createElement('span');
+        meta.className = 'sp-row__meta';
+        meta.textContent = 'style';
+
+        row.append(toggle, iconWrap, label, meta);
+
+        row.addEventListener('click', () => {
+          if (this._activeStyleId === style.id) return; // already active
+          this._activeStyleId = style.id;
+          if (this._onSwitchMapStyle) this._onSwitchMapStyle(style);
+          this.render();
+        });
+        body.appendChild(row);
+      }
+    }
+
+    // ── Tile data layers (toggleable overlays) ────────────────────────────
     for (const layer of tileLayers) {
       const isVisible = layer.meta.visible;
       const layerId = layer.meta.id;
@@ -159,7 +247,7 @@ export class SidePanel {
     }
   }
 
-  // ── Data ────────────────────────────────────────────────────────────────
+  // ── Data (ES indexes – lazy loaded) ────────────────────────────────────
 
   private _renderData(): void {
     const body = document.getElementById('sp-data-body');
@@ -167,93 +255,102 @@ export class SidePanel {
     if (!body || !countEl) return;
     body.innerHTML = '';
 
-    const sourceIds = this._store.allSourceIds()
-      .filter(id => !this._hiddenIndexes.has(id))
-      .sort((a, b) => a.localeCompare(b));
-    countEl.textContent = String(sourceIds.length);
+    const enabledIds = [...this._enabledIndexes].sort((a, b) => a.localeCompare(b));
+    countEl.textContent = String(enabledIds.length);
 
-    if (sourceIds.length === 0) {
-      body.innerHTML = '<div class="sp-empty">No data sources</div>';
+    if (enabledIds.length === 0) {
+      body.innerHTML = '<div class="sp-empty">No data sources enabled</div>';
       return;
     }
 
-    for (const sourceId of sourceIds) {
-      const features = this._store.get(sourceId);
-      const count = features.length;
-
+    for (const sourceId of enabledIds) {
+      const isLoading = this._loadingIndexes.has(sourceId);
       const matchingLayer = this._reg.get<DeckLayerAdapter>(sourceId);
-      const geoType: GeoType = matchingLayer
-        ? matchingLayer.geoType
-        : (features[0]?.geometry?.type === 'Point'
-            ? 'point'
-            : features[0]?.geometry?.type === 'LineString'
-              ? 'line'
-              : 'polygon');
-
-      const isVisible = matchingLayer?.meta.visible !== false;
+      const isLoaded = !!matchingLayer;
+      const isVisible = isLoaded && matchingLayer.meta.visible !== false;
 
       const row = document.createElement('div');
       row.className = 'sp-row' + (isVisible ? '' : ' sp-row--off');
 
+      // Toggle indicator
       const toggle = document.createElement('div');
-      toggle.className = 'sp-row__toggle' + (isVisible ? ' sp-row__toggle--on' : '');
+      toggle.className = 'sp-row__toggle'
+        + (isVisible ? ' sp-row__toggle--on' : '')
+        + (isLoading ? ' sp-row__toggle--loading' : '');
 
+      // Geo icon
       const iconWrap = document.createElement('div');
       iconWrap.className = 'sp-row__icon';
-      const c = matchingLayer?.color ?? [100, 160, 220, 200];
-      iconWrap.appendChild(geoIcon(geoType, `rgb(${c[0]},${c[1]},${c[2]})`));
+      if (isLoaded && matchingLayer) {
+        const c = matchingLayer.color ?? [100, 160, 220, 200];
+        const geoType: GeoType = matchingLayer.geoType;
+        iconWrap.appendChild(geoIcon(geoType, `rgb(${c[0]},${c[1]},${c[2]})`));
+      } else {
+        // Unloaded — show generic point icon in muted color
+        iconWrap.appendChild(geoIcon('point', 'var(--ft-text-muted)'));
+      }
 
+      // Label
       const label = document.createElement('span');
       label.className = 'sp-row__label';
       label.textContent = sourceId;
 
+      // Meta: feature count (loaded) or doc count from metadata (unloaded)
       const meta = document.createElement('span');
       meta.className = 'sp-row__meta';
-      meta.textContent = fmtCount(count);
-
-      // Style paintbrush button
-      const styleBtn = document.createElement('button');
-      styleBtn.className = 'sp-row__gear';
-      styleBtn.title = 'Edit layer style';
-      styleBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg>';
-
-      // Settings gear button
-      const gear = document.createElement('button');
-      gear.className = 'sp-row__gear';
-      gear.title = 'Configure tooltip attributes';
-      gear.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+      if (isLoading) {
+        meta.textContent = 'loading…';
+      } else if (isLoaded) {
+        meta.textContent = fmtCount(this._store.get(sourceId).length);
+      } else {
+        const info = this._indexMetadata.get(sourceId);
+        meta.textContent = info ? fmtCount(info.docsCount) + ' docs' : '—';
+      }
 
       // Warning icon for indexes with no compatible geo field
       const geoFields = this._geoFieldsCache.get(sourceId);
-      if (geoFields && geoFields.length === 0) {
+      const hasNoGeo = geoFields && geoFields.length === 0;
+      if (hasNoGeo) {
         const warn = document.createElement('span');
         warn.className = 'sp-row__warn';
         warn.title = 'No compatible geo field detected';
         warn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
-        row.append(toggle, iconWrap, label, warn, meta, styleBtn, gear);
+        row.append(toggle, iconWrap, label, warn, meta);
       } else {
-        row.append(toggle, iconWrap, label, meta, styleBtn, gear);
+        row.append(toggle, iconWrap, label, meta);
       }
 
-      // Button handlers — stopPropagation prevents the row toggle from firing
-      styleBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this._onOpenStyleEditor(sourceId);
-      });
-      gear.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this._onOpenSettings(sourceId);
-      });
-
-      // Row click = toggle visibility (only if there's a layer to toggle)
-      if (matchingLayer) {
-        row.addEventListener('click', () => {
-          const current = this._reg.get(sourceId);
-          if (current) {
-            this._reg.setVisible(sourceId, !current.meta.visible);
-          }
+      // Style + settings buttons only when loaded
+      if (isLoaded) {
+        const styleBtn = document.createElement('button');
+        styleBtn.className = 'sp-row__gear';
+        styleBtn.title = 'Edit layer style';
+        styleBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></svg>';
+        styleBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this._onOpenStyleEditor(sourceId);
         });
+
+        const gear = document.createElement('button');
+        gear.className = 'sp-row__gear';
+        gear.title = 'Configure tooltip attributes';
+        gear.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
+        gear.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this._onOpenSettings(sourceId);
+        });
+
+        // Append buttons after meta (or after warn+meta)
+        row.append(styleBtn, gear);
       }
+
+      // Row click = toggle load/unload
+      row.addEventListener('click', () => {
+        if (isLoading) return; // ignore clicks while loading
+        if (this._onToggleData) {
+          this._onToggleData(sourceId, !isLoaded);
+        }
+      });
 
       body.appendChild(row);
     }

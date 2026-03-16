@@ -9,7 +9,7 @@ export default defineConfig(({ mode }) => {
   // In Docker Compose the container environment sets these to the service names.
   // For frontend-only dev (npm run dev outside Docker) set them in .env to
   // the locally reachable addresses (e.g. http://localhost:9200).
-  const esTarget = env.VITE_ES_URL ?? 'http://elasticsearch:9200';
+  const esTarget = env.VITE_ES_BASE_URL ?? 'http://elasticsearch:9200';
   const geoserverTarget = env.VITE_GEOSERVER_URL ?? 'http://geoserver:8080/geoserver';
   const tileserverTarget = env.VITE_TILESERVER_URL ?? 'http://tileserver:8080';
 
@@ -28,6 +28,7 @@ export default defineConfig(({ mode }) => {
       '/api/es': {
         target: esTarget,
         changeOrigin: true,
+        secure: false,
         rewrite: (path) => path.replace(/^\/api\/es/, ''),
       },
       '/api/geoserver': {

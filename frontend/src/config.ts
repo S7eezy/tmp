@@ -7,6 +7,9 @@ export const Config = {
   /** Elasticsearch proxy base (Vite dev proxy rewrites to the real host). */
   esBaseUrl: import.meta.env.VITE_ES_BASE_URL ?? '/api/es',
 
+  /** Optional ES API key (sent as `Authorization: ApiKey <key>`). */
+  esApiKey: (import.meta.env.VITE_ES_API_KEY as string | undefined) || undefined,
+
   /** GeoServer proxy base. */
   geoserverBaseUrl:
     import.meta.env.VITE_GEOSERVER_BASE_URL ?? '/api/geoserver',
@@ -55,8 +58,14 @@ export const Config = {
     pickable: true,
   },
 
-  /** Map style – dark OpenFreeMap tiles (no API key). */
-  mapStyle:
-    import.meta.env.VITE_MAP_STYLE ??
-    'https://tiles.openfreemap.org/styles/dark',
+  /** Map style name (e.g. 'leviathan'). Undefined = use OpenFreeMap fallback. */
+  mapStyleName: (import.meta.env.VITE_MAP_STYLE as string | undefined),
+
+  /** Fully resolved map style URL for MapLibre. */
+  mapStyle: (() => {
+    const name = import.meta.env.VITE_MAP_STYLE as string | undefined;
+    const base = (import.meta.env.VITE_TILESERVER_BASE_URL as string ?? '/api/tiles').replace(/\/$/, '');
+    if (name && base) return `${base}/styles/${name}/style.json`;
+    return 'https://tiles.openfreemap.org/styles/dark';
+  })(),
 } as const;

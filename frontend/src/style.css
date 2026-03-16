@@ -1906,3 +1906,42 @@ body.filter-open .maplibregl-ctrl-top-left { left: var(--ft-filter-w); }
 .settings-search:focus {
   border-color: var(--ft-accent);
 }
+
+/* ── Toast notifications ────────────────────────────────────────────── */
+
+.ft-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(20px);
+  opacity: 0;
+  padding: 10px 20px;
+  border-radius: var(--ft-radius);
+  font-size: 13px;
+  font-family: var(--ft-font);
+  color: var(--ft-text);
+  background: var(--ft-surface-2);
+  border: 1px solid var(--ft-border);
+  z-index: 10000;
+  pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  max-width: 480px;
+  text-align: center;
+}
+.ft-toast--visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0);
+}
+.ft-toast--warning { border-color: #e6a817; }
+.ft-toast--error   { border-color: var(--ft-danger); }
+
+/* ── Loading pulse for toggle ───────────────────────────────────────── */
+
+.sp-row__toggle--loading {
+  animation: ft-pulse 1s ease-in-out infinite;
+}
+@keyframes ft-pulse {
+  0%, 100% { opacity: 0.3; }
+  50%      { opacity: 1; }
+}

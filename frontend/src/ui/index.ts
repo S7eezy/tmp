@@ -1,7 +1,7 @@
 export { Toolbar } from './Toolbar';
 export type { PanelName } from './Toolbar';
 export { SidePanel } from './SidePanel';
-export type { SidePanelDeps, HiddenIndexes } from './SidePanel';
+export type { SidePanelDeps, EnabledIndexes } from './SidePanel';
 export { SettingsModal } from './SettingsModal';
 export { DataConfigModal } from './DataConfigModal';
 export type { DataVisibilityConfig } from './DataConfigModal';
@@ -12,3 +12,5 @@ export { DrawMode } from './DrawMode';
 export { SearchPanel } from './SearchPanel';
 export { Hud } from './Hud';
 export { geoIcon, tileIcon, svgIcon } from './icons';
+export { showToast } from './Toast';
+export type { ToastType } from './Toast';

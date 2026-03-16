@@ -1,11 +1,10 @@
 // ---------------------------------------------------------------------------
 // DataConfigModal – popup to configure which ES indexes appear in the DATA
 // section of the side panel. Shows all discovered indexes with doc counts
-// and allows toggling visibility. Persists config to Elasticsearch.
+// and allows toggling which are enabled. Persists config to Elasticsearch.
 // ---------------------------------------------------------------------------
 
 import type { ElasticClient, EsIndexInfo } from '@core/data';
-import type { HiddenIndexes } from './SidePanel';
 
 /** Warn icon SVG for indexes with no geo field. */
 const WARN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="var(--ft-warn, #e6a817)" stroke-width="2" width="14" height="14"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
@@ -18,9 +17,12 @@ const CONFIG_INDEX = '.fleettracker-config';
 const CONFIG_DOC_ID = 'data-visibility';
 
 export interface DataVisibilityConfig {
-  /** Index names that are hidden from the DATA panel. */
-  hiddenIndexes: string[];
+  /** Index names that are enabled (shown) in the DATA panel. */
+  enabledIndexes: string[];
 }
+
+/** Set of index names that are enabled in the DATA list. */
+export type EnabledIndexes = Set<string>;
 
 // ---------------------------------------------------------------------------
 // DataConfigModal
@@ -29,18 +31,18 @@ export interface DataVisibilityConfig {
 export class DataConfigModal {
   private _esClient: ElasticClient;
   private _allIndices: EsIndexInfo[] = [];
-  private _hiddenIndexes: HiddenIndexes;
-  private _onSave: (hidden: HiddenIndexes) => void;
+  private _enabledIndexes: EnabledIndexes;
+  private _onSave: (enabled: EnabledIndexes) => void;
   private _geoFieldsCache: Map<string, string[]>;
 
   constructor(opts: {
     esClient: ElasticClient;
-    hiddenIndexes: HiddenIndexes;
-    onSave: (hidden: HiddenIndexes) => void;
+    enabledIndexes: EnabledIndexes;
+    onSave: (enabled: EnabledIndexes) => void;
     geoFieldsCache?: Map<string, string[]>;
   }) {
     this._esClient = opts.esClient;
-    this._hiddenIndexes = opts.hiddenIndexes;
+    this._enabledIndexes = opts.enabledIndexes;
     this._onSave = opts.onSave;
     this._geoFieldsCache = opts.geoFieldsCache ?? new Map();
   }
@@ -52,16 +54,21 @@ export class DataConfigModal {
 
   // -- ES persistence ----------------------------------------------------
 
-  /** Load hidden indexes config from ES. Returns a Set of hidden index names. */
-  async loadConfig(): Promise<HiddenIndexes> {
+  /** Load enabled indexes config from ES. Returns a Set of enabled index names. */
+  async loadConfig(): Promise<EnabledIndexes> {
     try {
       const res = await fetch(
         `${this._esClient.baseUrl}/${CONFIG_INDEX}/_doc/${CONFIG_DOC_ID}`,
+        { headers: this._authHeaders() },
       );
       if (res.ok) {
         const doc = await res.json();
-        const cfg = doc._source as DataVisibilityConfig;
-        return new Set(cfg.hiddenIndexes ?? []);
+        const cfg = doc._source as Record<string, unknown>;
+        // New format: enabledIndexes
+        if (Array.isArray(cfg.enabledIndexes)) {
+          return new Set(cfg.enabledIndexes as string[]);
+        }
+        // Old format (hiddenIndexes) → treat as fresh start (nothing enabled)
       }
     } catch {
       // Config index doesn't exist yet – that's fine
@@ -69,19 +76,22 @@ export class DataConfigModal {
     return new Set();
   }
 
-  /** Save hidden indexes config to ES (shared across all users). */
-  async saveConfig(hidden: HiddenIndexes): Promise<void> {
+  /** Save enabled indexes config to ES (shared across all users). */
+  async saveConfig(enabled: EnabledIndexes): Promise<void> {
     const body: DataVisibilityConfig = {
-      hiddenIndexes: [...hidden],
+      enabledIndexes: [...enabled],
     };
 
     // Ensure config index exists (only create if missing)
     try {
-      const head = await fetch(`${this._esClient.baseUrl}/${CONFIG_INDEX}`, { method: 'HEAD' });
+      const head = await fetch(
+        `${this._esClient.baseUrl}/${CONFIG_INDEX}`,
+        { method: 'HEAD', headers: this._authHeaders() },
+      );
       if (!head.ok) {
         await fetch(`${this._esClient.baseUrl}/${CONFIG_INDEX}`, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
+          headers: this._authHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({
             settings: { number_of_shards: 1, number_of_replicas: 0 },
           }),
@@ -95,13 +105,20 @@ export class DataConfigModal {
       `${this._esClient.baseUrl}/${CONFIG_INDEX}/_doc/${CONFIG_DOC_ID}`,
       {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: this._authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(body),
       },
     );
     if (!res.ok) {
       console.error('[DataConfigModal] Failed to save config:', res.status);
     }
+  }
+
+  // -- Auth helper -------------------------------------------------------
+
+  /** Delegate to ElasticClient's public headers() for consistent auth. */
+  private _authHeaders(extra?: Record<string, string>): Record<string, string> {
+    return this._esClient.headers(extra);
   }
 
   // -- UI ----------------------------------------------------------------
@@ -122,12 +139,12 @@ export class DataConfigModal {
     bodyEl.innerHTML = '';
 
     // Work on a local copy so we can cancel
-    const localHidden = new Set(this._hiddenIndexes);
+    const localEnabled = new Set(this._enabledIndexes);
 
     // Hint text
     const info = document.createElement('p');
     info.className = 'settings-hint';
-    info.textContent = 'Toggle which Elasticsearch indexes are visible in the DATA list:';
+    info.textContent = 'Toggle which Elasticsearch indexes appear in the DATA panel:';
     bodyEl.appendChild(info);
 
     // Search bar
@@ -156,10 +173,10 @@ export class DataConfigModal {
         const item = document.createElement('div');
         item.className = 'data-config-item';
 
-        const isVisible = !localHidden.has(idx.index);
+        const isEnabled = localEnabled.has(idx.index);
 
         const toggle = document.createElement('div');
-        toggle.className = 'sp-row__toggle' + (isVisible ? ' sp-row__toggle--on' : '');
+        toggle.className = 'sp-row__toggle' + (isEnabled ? ' sp-row__toggle--on' : '');
 
         const nameSpan = document.createElement('span');
         nameSpan.className = 'data-config-name';
@@ -182,18 +199,18 @@ export class DataConfigModal {
         }
 
         item.addEventListener('click', () => {
-          if (localHidden.has(idx.index)) {
-            localHidden.delete(idx.index);
-            toggle.classList.add('sp-row__toggle--on');
-            item.classList.remove('data-config-item--off');
-          } else {
-            localHidden.add(idx.index);
+          if (localEnabled.has(idx.index)) {
+            localEnabled.delete(idx.index);
             toggle.classList.remove('sp-row__toggle--on');
             item.classList.add('data-config-item--off');
+          } else {
+            localEnabled.add(idx.index);
+            toggle.classList.add('sp-row__toggle--on');
+            item.classList.remove('data-config-item--off');
           }
         });
 
-        if (!isVisible) {
+        if (!isEnabled) {
           item.classList.add('data-config-item--off');
         }
 
@@ -229,12 +246,12 @@ export class DataConfigModal {
     saveBtn.textContent = 'Save';
     saveBtn.addEventListener('click', async () => {
       // Update state
-      this._hiddenIndexes = new Set(localHidden);
-      this._onSave(this._hiddenIndexes);
+      this._enabledIndexes = new Set(localEnabled);
+      this._onSave(this._enabledIndexes);
 
       // Persist to ES
       try {
-        await this.saveConfig(this._hiddenIndexes);
+        await this.saveConfig(this._enabledIndexes);
       } catch (err) {
         console.error('[DataConfigModal] Failed to persist config:', err);
       }
