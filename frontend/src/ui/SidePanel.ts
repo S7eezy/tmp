@@ -55,6 +55,8 @@ export class SidePanel {
   private _loadingIndexes: Set<string> = new Set();
   /** Index metadata from listIndices() — used for doc counts on unloaded rows. */
   private _indexMetadata: Map<string, EsIndexInfo> = new Map();
+  /** Filtered doc counts for enabled-but-unloaded indexes (updated when filters change). */
+  private _filteredCounts: Map<string, number> = new Map();
 
   /** Available basemap styles from TileServer GL. */
   private _mapStyles: MapStyleEntry[] = [];
@@ -93,6 +95,17 @@ export class SidePanel {
   setLoading(indexId: string, loading: boolean): void {
     if (loading) this._loadingIndexes.add(indexId);
     else this._loadingIndexes.delete(indexId);
+  }
+
+  /** Update filtered doc count for an unloaded index. Pass `null` to clear. */
+  setFilteredCount(indexId: string, count: number | null): void {
+    if (count === null) this._filteredCounts.delete(indexId);
+    else this._filteredCounts.set(indexId, count);
+  }
+
+  /** Clear all filtered counts (e.g. when filters are cleared). */
+  clearFilteredCounts(): void {
+    this._filteredCounts.clear();
   }
 
   /** Set the list of available basemap styles and which one is active. */
@@ -303,8 +316,16 @@ export class SidePanel {
       } else if (isLoaded) {
         meta.textContent = fmtCount(this._store.get(sourceId).length);
       } else {
+        // Show filtered count if available, otherwise raw doc count
+        const filteredCount = this._filteredCounts.get(sourceId);
         const info = this._indexMetadata.get(sourceId);
-        meta.textContent = info ? fmtCount(info.docsCount) + ' docs' : '—';
+        if (filteredCount != null && info) {
+          meta.textContent = `${fmtCount(filteredCount)} / ${fmtCount(info.docsCount)} docs`;
+        } else if (info) {
+          meta.textContent = fmtCount(info.docsCount) + ' docs';
+        } else {
+          meta.textContent = '—';
+        }
       }
 
       // Warning icon for indexes with no compatible geo field

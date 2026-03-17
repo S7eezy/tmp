@@ -644,9 +644,9 @@ export class FilterPanel {
     title.appendChild(cancel);
     wrap.appendChild(title);
 
+    // Time filters are managed via the toolbar Time modal — only geo + value here.
     const types: Array<{ kind: FormStep & ('geo' | 'time' | 'value'); icon: string; label: string; desc: string }> = [
       { kind: 'geo', label: 'Geographic', icon: '<circle cx="12" cy="10" r="3"/><path d="M12 2a8 8 0 0 0-8 8c0 5.25 8 13 8 13s8-7.75 8-13a8 8 0 0 0-8-8z"/>', desc: 'Bounding box, draw polygon, or country' },
-      { kind: 'time', label: 'Time', icon: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>', desc: 'Filter by date / time range' },
       { kind: 'value', label: 'Value', icon: '<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>', desc: 'Filter by field value on an index' },
     ];
 

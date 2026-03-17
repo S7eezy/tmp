@@ -4,16 +4,16 @@
 // and allows toggling which are enabled. Persists config to Elasticsearch.
 // ---------------------------------------------------------------------------
 
-import type { ElasticClient, EsIndexInfo } from '@core/data';
+import type { ApiClient, EsIndexInfo } from '@core/data';
+import { Config } from '../config';
 
 /** Warn icon SVG for indexes with no geo field. */
 const WARN_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="var(--ft-warn, #e6a817)" stroke-width="2" width="14" height="14"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>';
 
 // ---------------------------------------------------------------------------
-// ES persistence helpers
+// Config persistence
 // ---------------------------------------------------------------------------
 
-const CONFIG_INDEX = '.fleettracker-config';
 const CONFIG_DOC_ID = 'data-visibility';
 
 export interface DataVisibilityConfig {
@@ -29,19 +29,19 @@ export type EnabledIndexes = Set<string>;
 // ---------------------------------------------------------------------------
 
 export class DataConfigModal {
-  private _esClient: ElasticClient;
+  private _apiClient: ApiClient;
   private _allIndices: EsIndexInfo[] = [];
   private _enabledIndexes: EnabledIndexes;
   private _onSave: (enabled: EnabledIndexes) => void;
   private _geoFieldsCache: Map<string, string[]>;
 
   constructor(opts: {
-    esClient: ElasticClient;
+    apiClient: ApiClient;
     enabledIndexes: EnabledIndexes;
     onSave: (enabled: EnabledIndexes) => void;
     geoFieldsCache?: Map<string, string[]>;
   }) {
-    this._esClient = opts.esClient;
+    this._apiClient = opts.apiClient;
     this._enabledIndexes = opts.enabledIndexes;
     this._onSave = opts.onSave;
     this._geoFieldsCache = opts.geoFieldsCache ?? new Map();
@@ -52,73 +52,38 @@ export class DataConfigModal {
     this._allIndices = indices;
   }
 
-  // -- ES persistence ----------------------------------------------------
+  // -- Backend API persistence ---------------------------------------------
 
-  /** Load enabled indexes config from ES. Returns a Set of enabled index names. */
+  /** Load enabled indexes config from backend. Updates internal state and returns the Set. */
   async loadConfig(): Promise<EnabledIndexes> {
     try {
-      const res = await fetch(
-        `${this._esClient.baseUrl}/${CONFIG_INDEX}/_doc/${CONFIG_DOC_ID}`,
-        { headers: this._authHeaders() },
-      );
+      const res = await fetch(`${Config.apiBaseUrl}/config/${CONFIG_DOC_ID}`);
       if (res.ok) {
-        const doc = await res.json();
-        const cfg = doc._source as Record<string, unknown>;
-        // New format: enabledIndexes
+        const cfg = await res.json();
         if (Array.isArray(cfg.enabledIndexes)) {
-          return new Set(cfg.enabledIndexes as string[]);
+          this._enabledIndexes = new Set(cfg.enabledIndexes as string[]);
+          return this._enabledIndexes;
         }
-        // Old format (hiddenIndexes) → treat as fresh start (nothing enabled)
       }
     } catch {
-      // Config index doesn't exist yet – that's fine
+      // Config doesn't exist yet – that's fine
     }
-    return new Set();
+    return this._enabledIndexes;
   }
 
-  /** Save enabled indexes config to ES (shared across all users). */
+  /** Save enabled indexes config to backend. */
   async saveConfig(enabled: EnabledIndexes): Promise<void> {
     const body: DataVisibilityConfig = {
       enabledIndexes: [...enabled],
     };
-
-    // Ensure config index exists (only create if missing)
-    try {
-      const head = await fetch(
-        `${this._esClient.baseUrl}/${CONFIG_INDEX}`,
-        { method: 'HEAD', headers: this._authHeaders() },
-      );
-      if (!head.ok) {
-        await fetch(`${this._esClient.baseUrl}/${CONFIG_INDEX}`, {
-          method: 'PUT',
-          headers: this._authHeaders({ 'Content-Type': 'application/json' }),
-          body: JSON.stringify({
-            settings: { number_of_shards: 1, number_of_replicas: 0 },
-          }),
-        });
-      }
-    } catch {
-      // Ignore – ES might be unreachable
-    }
-
-    const res = await fetch(
-      `${this._esClient.baseUrl}/${CONFIG_INDEX}/_doc/${CONFIG_DOC_ID}`,
-      {
-        method: 'PUT',
-        headers: this._authHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify(body),
-      },
-    );
+    const res = await fetch(`${Config.apiBaseUrl}/config/${CONFIG_DOC_ID}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
     if (!res.ok) {
       console.error('[DataConfigModal] Failed to save config:', res.status);
     }
-  }
-
-  // -- Auth helper -------------------------------------------------------
-
-  /** Delegate to ElasticClient's public headers() for consistent auth. */
-  private _authHeaders(extra?: Record<string, string>): Record<string, string> {
-    return this._esClient.headers(extra);
   }
 
   // -- UI ----------------------------------------------------------------
@@ -126,7 +91,7 @@ export class DataConfigModal {
   async open(): Promise<void> {
     // Refresh the full index list before opening
     try {
-      this._allIndices = await this._esClient.listIndices();
+      this._allIndices = await this._apiClient.listIndices();
     } catch (err) {
       console.warn('[DataConfigModal] Could not refresh index list:', err);
     }
@@ -245,11 +210,11 @@ export class DataConfigModal {
     saveBtn.className = 'data-config-btn data-config-btn--primary';
     saveBtn.textContent = 'Save';
     saveBtn.addEventListener('click', async () => {
-      // Update state
+      // Update internal state + notify parent
       this._enabledIndexes = new Set(localEnabled);
       this._onSave(this._enabledIndexes);
 
-      // Persist to ES
+      // Persist to backend
       try {
         await this.saveConfig(this._enabledIndexes);
       } catch (err) {

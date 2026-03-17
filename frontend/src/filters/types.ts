@@ -93,4 +93,8 @@ export interface IndexAttributeConfig {
   indexId: string;
   /** Map of attribute name → visible in tooltip. */
   attributes: Record<string, boolean>;
+  /** Ordered field names for tooltip display. If absent, uses Object.keys(attributes). */
+  fieldOrder?: string[];
+  /** Field used as timestamp for the global time filter. Defaults to 'timestamp'. */
+  timestampField?: string;
 }

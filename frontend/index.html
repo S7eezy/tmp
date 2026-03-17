@@ -4,7 +4,6 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>FleetTracker</title>
-    <link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin />
   </head>
   <body>
     <!-- Fullscreen map container -->
@@ -32,6 +31,15 @@
           <line x1="21" y1="21" x2="16.65" y2="16.65"/>
         </svg>
       </button>
+      <div class="toolbar__separator"></div>
+      <button class="toolbar__btn" id="tb-time" title="Time filter">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <polyline points="12 6 12 12 16 14"/>
+        </svg>
+      </button>
+      <span class="toolbar__label" id="tb-time-label">Last 30 min</span>
+      <div class="toolbar__separator"></div>
       <button class="toolbar__btn" id="tb-layers" data-panel="layers" title="Layers (right)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 2L2 7l10 5 10-5-10-5z"/>

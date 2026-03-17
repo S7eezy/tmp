@@ -1,0 +1,101 @@
+# ── FleetTracker nginx config (template) ─────────────────────
+# Variables resolved at container start by entrypoint.sh.
+# All three must be bare origin (scheme + host + optional port).
+# NO trailing slash, NO path suffix.
+#
+#   ${BACKEND_URL}    e.g. http://ft-backend-svc:8000
+#   ${GEOSERVER_URL}  e.g. http://geoserver.example.com
+#   ${TILESERVER_URL} e.g. http://maps.example.com
+# ─────────────────────────────────────────────────────────────
+
+# OpenShift: pid file in writable location
+pid /tmp/nginx.pid;
+
+worker_processes auto;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    # OpenShift: temp paths in writable location
+    client_body_temp_path /tmp/client_temp;
+    proxy_temp_path       /tmp/proxy_temp;
+    fastcgi_temp_path     /tmp/fastcgi_temp;
+    uwsgi_temp_path       /tmp/uwsgi_temp;
+    scgi_temp_path        /tmp/scgi_temp;
+
+    sendfile    on;
+    tcp_nopush  on;
+    keepalive_timeout 65;
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml image/svg+xml;
+
+    server {
+        listen 8080;
+        server_name _;
+
+        root /app/dist;
+        index index.html;
+
+        # ── API proxies ──────────────────────────────────────────
+        # Longer prefixes first — nginx matches the longest prefix.
+
+        # /api/geoserver/ows?… → ${GEOSERVER_URL}/geoserver/ows?…
+        location /api/geoserver/ {
+            proxy_pass ${GEOSERVER_URL}/geoserver/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        # /api/tiles/styles/leviathan/style.json → ${TILESERVER_URL}/styles/leviathan/style.json
+        location /api/tiles/ {
+            proxy_pass ${TILESERVER_URL}/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        # ── TileServer absolute-URL fallbacks ───────────────────
+        # TileServer generates absolute URLs in style.json using the
+        # Host header (e.g. /data/openmaptiles.json, /fonts/...).
+        # These bypass the /api/tiles/ prefix, so we catch them here.
+        location /data/ {
+            proxy_pass ${TILESERVER_URL}/data/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        location /fonts/ {
+            proxy_pass ${TILESERVER_URL}/fonts/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        location /styles/ {
+            proxy_pass ${TILESERVER_URL}/styles/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        # /api/indices → ${BACKEND_URL}/api/indices
+        location /api/ {
+            proxy_pass ${BACKEND_URL}/api/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        # ── SPA fallback ─────────────────────────────────────────
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+
+        # ── Cache static assets ──────────────────────────────────
+        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff2?)$ {
+            expires 30d;
+            add_header Cache-Control "public, immutable";
+        }
+    }
+}

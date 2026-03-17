@@ -737,6 +737,108 @@ body.panel-open .coords-badge { right: calc(var(--ft-panel-w) + 8px); }
   cursor: pointer;
 }
 
+/* --------------------------------------------------------------------------
+   Settings Modal – Enhanced (timestamp picker + drag-to-reorder)
+   -------------------------------------------------------------------------- */
+
+.sm-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sm-section-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ft-text);
+}
+
+.sm-hint {
+  font-size: 11px;
+  color: var(--ft-text-muted);
+  margin-bottom: 6px;
+}
+
+.sm-select {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 13px;
+  background: var(--ft-bg);
+  color: var(--ft-text);
+  border: 1px solid var(--ft-border);
+  border-radius: var(--ft-radius);
+  cursor: pointer;
+}
+.sm-select:focus {
+  outline: none;
+  border-color: var(--ft-accent);
+}
+
+.sm-separator {
+  height: 1px;
+  background: var(--ft-border);
+  margin: 12px 0;
+}
+
+.sm-attr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 350px;
+  overflow-y: auto;
+}
+
+.sm-attr-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: var(--ft-radius);
+  font-size: 13px;
+  color: var(--ft-text);
+  transition: background 0.1s;
+  border: 1px solid transparent;
+}
+.sm-attr-item:hover { background: var(--ft-accent-dim, rgba(59,130,246,0.08)); }
+
+.sm-attr-item[draggable="true"] { cursor: grab; }
+.sm-attr-item[draggable="true"]:active { cursor: grabbing; }
+
+.sm-drag-handle {
+  font-size: 16px;
+  color: var(--ft-text-muted);
+  cursor: grab;
+  user-select: none;
+  line-height: 1;
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+}
+
+.sm-attr-cb {
+  accent-color: var(--ft-accent);
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.sm-attr-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Drag feedback */
+.sm-dragging {
+  opacity: 0.4;
+}
+.sm-drag-over {
+  border-color: var(--ft-accent);
+  background: rgba(59, 130, 246, 0.12);
+}
+
 /* ==========================================================================
    DRAW MODE (polygon drawing indicator)
    ========================================================================== */
@@ -1944,4 +2046,204 @@ body.filter-open .maplibregl-ctrl-top-left { left: var(--ft-filter-w); }
 @keyframes ft-pulse {
   0%, 100% { opacity: 0.3; }
   50%      { opacity: 1; }
+}
+
+/* ==========================================================================
+   Toolbar label + separator
+   ========================================================================== */
+
+.toolbar__separator {
+  width: 1px;
+  height: 24px;
+  background: var(--ft-border);
+  align-self: center;
+  flex-shrink: 0;
+}
+
+.toolbar__label {
+  font-size: 11px;
+  color: var(--ft-accent);
+  white-space: nowrap;
+  align-self: center;
+  padding: 0 4px;
+  font-weight: 500;
+}
+
+.toolbar__label--muted {
+  color: var(--ft-text-muted);
+  font-weight: 400;
+}
+
+/* ==========================================================================
+   Time Modal
+   ========================================================================== */
+
+.tm-root {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 340px;
+}
+
+/* ── Tab bar ──────────────────────────────────────────────────────────── */
+
+.tm-tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--ft-bg);
+  border-radius: 8px;
+  padding: 3px;
+}
+
+.tm-tab {
+  flex: 1;
+  padding: 7px 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ft-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.tm-tab:hover { color: var(--ft-text); }
+
+.tm-tab--active {
+  background: var(--ft-accent);
+  color: #fff;
+}
+
+/* ── Relative tab ─────────────────────────────────────────────────────── */
+
+.tm-dir-row {
+  display: flex;
+  gap: 6px;
+}
+
+.tm-dir-btn {
+  flex: 1;
+  padding: 8px 0;
+  border: 1px solid var(--ft-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ft-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.tm-dir-btn:hover {
+  border-color: var(--ft-accent);
+  color: var(--ft-text);
+}
+
+.tm-dir-btn--active {
+  background: var(--ft-accent-dim);
+  border-color: var(--ft-accent);
+  color: var(--ft-accent);
+}
+
+.tm-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.tm-amount {
+  width: 72px;
+  flex-shrink: 0;
+  text-align: center;
+}
+
+.tm-unit-group {
+  display: flex;
+  gap: 4px;
+  flex: 1;
+}
+
+.tm-unit-btn {
+  flex: 1;
+  padding: 7px 0;
+  border: 1px solid var(--ft-border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ft-text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.tm-unit-btn:hover {
+  border-color: var(--ft-accent);
+  color: var(--ft-text);
+}
+
+.tm-unit-btn--active {
+  background: var(--ft-accent-dim);
+  border-color: var(--ft-accent);
+  color: var(--ft-accent);
+}
+
+/* ── Absolute tab ─────────────────────────────────────────────────────── */
+
+.tm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tm-field-label {
+  font-size: 11px;
+  color: var(--ft-text-muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.tm-date-input {
+  width: 100%;
+}
+
+/* ── Actions ──────────────────────────────────────────────────────────── */
+
+.tm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding-top: 8px;
+  border-top: 1px solid var(--ft-border);
+}
+
+.tm-btn {
+  padding: 8px 20px;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.tm-btn--ghost {
+  background: transparent;
+  color: var(--ft-text-muted);
+  border: 1px solid var(--ft-border);
+}
+
+.tm-btn--ghost:hover {
+  background: var(--ft-bg);
+  color: var(--ft-text);
+}
+
+.tm-btn--primary {
+  background: var(--ft-accent);
+  color: #fff;
+}
+
+.tm-btn--primary:hover {
+  background: var(--ft-accent-hover);
 }

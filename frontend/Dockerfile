@@ -1,26 +1,44 @@
-# ── Stage 1: Build ─────────────────────────────────────────────────────────
-FROM node:22-alpine AS builder
+# ── FleetTracker Frontend ────────────────────────────────────
+# Multi-stage: Node build -> nginx runtime
+# OpenShift random UID compatible
+# ─────────────────────────────────────────────────────────────
+
+# ── Stage 1 : Build ─────────────────────────────────────────
+FROM node:24-bullseye AS build
 
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 
 COPY . .
 # Skip tsc (pre-existing MapEngine.ts:81 antialias error); vite handles transpilation
 RUN npx vite build
 
-# ── Stage 2: Serve ─────────────────────────────────────────────────────────
+# ── Stage 2 : Runtime ───────────────────────────────────────
 FROM nginx:1.27-alpine
 
-# Remove default nginx site
-RUN rm /etc/nginx/conf.d/default.conf
+# Prepare writable directories for OpenShift random UID
+RUN mkdir -p \
+        /app/dist \
+        /tmp/client_temp \
+        /tmp/proxy_temp \
+        /tmp/fastcgi_temp \
+        /tmp/uwsgi_temp \
+        /tmp/scgi_temp \
+        /var/cache/nginx \
+        /var/log/nginx \
+    && chgrp -R 0 /app /tmp /var/cache/nginx /var/log/nginx /etc/nginx \
+    && chmod -R g+rwX /app /tmp /var/cache/nginx /var/log/nginx /etc/nginx
 
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Frontend build
+COPY --from=build /app/dist /app/dist
 
-# Copy built assets from builder
-COPY --from=builder /app/dist /usr/share/nginx/html
+# Config template + entrypoint
+COPY nginx.conf.template /etc/nginx/nginx.conf.template
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod g+rx /app/entrypoint.sh
 
-EXPOSE 5173
+EXPOSE 8080
 
-CMD ["nginx", "-g", "daemon off;"]
+ENTRYPOINT ["/app/entrypoint.sh"]

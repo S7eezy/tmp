@@ -60,16 +60,42 @@ services:
     networks:
       - ft-net
 
+  # ── Backend (FastAPI) ────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ft-backend
+    environment:
+      - ES_URL=http://elasticsearch:9200
+      - ES_API_KEY=${ES_API_KEY:-}
+      - ES_MAX_HITS=${ES_MAX_HITS:-10000}
+      - CONFIG_INDEX=${CONFIG_INDEX:-.fleettracker-config}
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/api/health\")'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ft-net
+
   # ── Frontend (nginx + static build) ──────────────────
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: ft-frontend
+    environment:
+      - BACKEND_URL=${BACKEND_URL:-http://backend:8000}
+      - GEOSERVER_URL=${GEOSERVER_URL:-http://geoserver:8080}
+      - TILESERVER_URL=${TILESERVER_URL:-http://tileserver:8080}
     ports:
-      - "${FRONTEND_PORT}:5173"
+      - "${FRONTEND_PORT}:8080"
     depends_on:
-      elasticsearch:
+      backend:
         condition: service_healthy
     networks:
       - ft-net

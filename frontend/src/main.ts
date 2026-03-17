@@ -11,12 +11,13 @@ import './style.css';
 import { MapEngine } from '@core/map';
 import { LayerRegistry, DeckLayerAdapter, WmsLayerAdapter, TileServerAdapter, preloadIcons } from '@core/layers';
 import type { GeoType, TileFormat } from '@core/layers';
-import { DataStore, ElasticClient, GeoServerClient, TileServerClient } from '@core/data';
+import { DataStore, ApiClient, GeoServerClient, TileServerClient } from '@core/data';
 import type { EsIndexInfo } from '@core/data';
 import { Config } from './config';
 import { FilterEngine, FilterPanel } from '@filters';
-import { Toolbar, SidePanel, SettingsModal, DataConfigModal, LayerStyleModal, FeatureTooltip, DrawMode, SearchPanel, Hud, showToast } from '@ui';
-import type { Feature } from 'geojson';
+import { Toolbar, SidePanel, SettingsModal, DataConfigModal, LayerStyleModal, FeatureTooltip, DrawMode, SearchPanel, Hud, showToast, TimeModal } from '@ui';
+import type { Feature, FeatureCollection } from 'geojson';
+import type { GeoFilter } from '@filters';
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -64,7 +65,7 @@ async function boot(): Promise<void> {
   const geoFieldsCache  = new Map<string, string[]>();
   const layerRegistry   = new LayerRegistry();
   const filterEngine  = new FilterEngine();
-  const esClient      = new ElasticClient();
+  const apiClient     = new ApiClient();
 
   // ── 2. Map engine + preload icons ────────────────────────────────────────
   const engine = new MapEngine({ container: 'map' });
@@ -74,7 +75,7 @@ async function boot(): Promise<void> {
   // ── 3. Discover ES index METADATA only (no data loaded) ─────────────────
   let indices: EsIndexInfo[] = [];
   try {
-    indices = await esClient.listIndices();
+    indices = await apiClient.listIndices();
     console.log(`[FleetTracker] Discovered ${indices.length} ES indices:`, indices.map(i => i.index));
   } catch (err) {
     console.warn('[FleetTracker] Could not connect to Elasticsearch:', err);
@@ -85,7 +86,7 @@ async function boot(): Promise<void> {
   const t0 = performance.now();
   await Promise.all(indices.map(async (info) => {
     try {
-      const geoFields = await esClient.detectGeoFields(info.index);
+      const geoFields = await apiClient.detectGeoFields(info.index);
       geoFieldsCache.set(info.index, geoFields);
     } catch {
       // Skip – mapping might be inaccessible
@@ -120,22 +121,8 @@ async function boot(): Promise<void> {
     console.log('[FleetTracker] Running without GeoServer layers.');
   }
 
-  // Fallback: keep the demo WMS layer if no GeoServer layers were discovered
-  if (layerRegistry.all().filter(l => l.meta.kind === 'maplibre').length === 0) {
-    const demoWms = new WmsLayerAdapter({
-      id: 'osm-wms',
-      label: 'OpenStreetMap WMS',
-      wmsUrl: 'https://ows.terrestris.de/osm/service',
-      wmsParams: { LAYERS: 'OSM-WMS' },
-      tileKind: 'raster',
-      minZoom: 0,
-      maxZoom: 18,
-      visible: false,
-      zIndex: -1,
-    });
-    layerRegistry.add(demoWms);
-    demoWms.attach(engine);
-  }
+  // No external demo WMS fallback — air-gapped deployments must not call
+  // outside URLs. If GeoServer is unreachable, the Layers section stays empty.
 
   // ── 5b. Discover TileServer GL tilesets & styles ───────────────────────
   const tileServerClient = new TileServerClient();
@@ -172,13 +159,17 @@ async function boot(): Promise<void> {
   }
 
   // ── 6. UI components ───────────────────────────────────────────────────
-  const settingsModal = new SettingsModal(dataStore, rawData);
+  const settingsModal = new SettingsModal(dataStore, rawData, {
+    onTimestampFieldChange: (sourceId, field) => {
+      filterEngine.setTimestampField(sourceId, field);
+    },
+  });
   const hud           = new Hud(engine, dataStore);
   const toolbar       = new Toolbar(filterEngine);
 
   // Data config modal: manages which ES indexes are enabled in the DATA panel
   const dataConfigModal = new DataConfigModal({
-    esClient,
+    apiClient,
     enabledIndexes: new Set(),
     geoFieldsCache,
     onSave: (enabled) => {
@@ -198,11 +189,11 @@ async function boot(): Promise<void> {
   const layerStyleModal = new LayerStyleModal({
     layerRegistry,
     dataStore,
-    esClient,
+    apiClient,
     onStyleChange: () => sync(),
   });
-  // Load saved styles from ES on boot
-  layerStyleModal.loadFromES().catch(() => { /* ignore */ });
+  // Load saved styles from backend on boot
+  layerStyleModal.loadFromBackend().catch(() => { /* ignore */ });
 
   const sidePanel     = new SidePanel({
     layerRegistry,
@@ -273,6 +264,15 @@ async function boot(): Promise<void> {
   featureTooltip.setup();
   searchPanel.setup();
 
+  // ── 9b. Time modal (toolbar) ────────────────────────────────────────────
+  const timeModal = new TimeModal({
+    filterEngine,
+    onApply: () => { /* filters change event handles re-render */ },
+  });
+  timeModal.setup();
+  // Apply default time filter: last 30 minutes (immediately active from boot)
+  timeModal.applyDefault();
+
   // ── 10. Filter panel ───────────────────────────────────────────────────
   var filterPanel = new FilterPanel({
     bodyEl: document.getElementById('fp-body')!,
@@ -297,6 +297,7 @@ async function boot(): Promise<void> {
     _filterAbort = new AbortController();
     const { signal } = _filterAbort;
 
+    // ── Re-filter loaded indexes ──────────────────────────────────────────
     for (const [sourceId, originalFeatures] of rawData) {
       if (signal.aborted) break;
 
@@ -311,13 +312,13 @@ async function boot(): Promise<void> {
           // Use cached mapping from boot; fall back to live fetch only for
           // indices that appeared after startup (edge case).
           const geoFields = geoFieldsCache.get(sourceId)
-            ?? await esClient.detectGeoFields(sourceId, signal);
+            ?? await apiClient.detectGeoFields(sourceId, signal);
           if (signal.aborted) break;
 
           const geoField = geoFields.length > 0 ? geoFields[0] : 'location';
           const query = filterEngine.buildQuery(sourceId);
 
-          const filtered = await esClient.searchAsGeoJSON({
+          const filtered = await apiClient.searchAsGeoJSON({
             index: sourceId,
             query,
             geoField,
@@ -333,19 +334,137 @@ async function boot(): Promise<void> {
       }
     }
 
-    if (!signal.aborted) filterPanel.render();
+    // ── Update filtered counts for enabled-but-NOT-loaded indexes ─────────
+    // This lets the user see how many docs match *before* loading, so they
+    // can tell when filters bring the count below 10k.
+    const hasAnyFilter = filterEngine.activeCount() > 0;
+    if (!hasAnyFilter) {
+      sidePanel.clearFilteredCounts();
+    } else {
+      for (const indexId of sidePanel.enabledIndexes) {
+        if (signal.aborted) break;
+        if (rawData.has(indexId)) continue; // already loaded — handled above
+        const activeFilters = filterEngine.getFiltersForIndex(indexId);
+        if (activeFilters.length === 0) {
+          sidePanel.setFilteredCount(indexId, null);
+          continue;
+        }
+        try {
+          const query = filterEngine.buildQuery(indexId);
+          const count = await apiClient.count(indexId, query, signal);
+          if (!signal.aborted) sidePanel.setFilteredCount(indexId, count);
+        } catch (err) {
+          if ((err as Error).name === 'AbortError') break;
+          // Can't get count — leave as unknown
+        }
+      }
+    }
+
+    if (!signal.aborted) {
+      sidePanel.render();
+      filterPanel.render();
+    }
   }, Config.filterDebounceMs);
 
   filterEngine.addEventListener('change', applyFilters);
 
-  // ── 12. Views & saved-filters persistence (Elasticsearch) ──────────────
-  filterEngine.setEsBaseUrl(Config.esBaseUrl);
+  // ── 11b. Geo filter outline rendering ───────────────────────────────────
+  // Draws active geo filter boundaries (bbox / polygon) permanently on the
+  // map so the user always sees the spatial constraint.
+  const GEO_OUTLINE_SOURCE = 'ft-geo-filter-outline';
+  const GEO_OUTLINE_FILL   = 'ft-geo-filter-fill';
+  const GEO_OUTLINE_LINE   = 'ft-geo-filter-line';
+
+  function updateGeoFilterOutlines(): void {
+    const map = engine.map;
+    if (!map.isStyleLoaded()) return;
+
+    // Collect active geo filter geometries
+    const geoFeatures: Feature[] = [];
+    for (const f of filterEngine.filters) {
+      if (f.kind !== 'geo' || !f.enabled) continue;
+      const gf = f as GeoFilter;
+
+      if (gf.mode === 'bbox' && gf.bbox) {
+        const { north, south, east, west } = gf.bbox;
+        geoFeatures.push({
+          type: 'Feature',
+          properties: { id: gf.id, label: gf.label },
+          geometry: {
+            type: 'Polygon',
+            coordinates: [[
+              [west, north], [east, north], [east, south], [west, south], [west, north],
+            ]],
+          },
+        });
+      } else if (gf.mode === 'polygon' && gf.polygon && gf.polygon.length >= 3) {
+        const ring: Array<[number, number]> = [...gf.polygon];
+        const [fx, fy] = ring[0]; const [lx, ly] = ring[ring.length - 1];
+        if (fx !== lx || fy !== ly) ring.push(ring[0]);
+        geoFeatures.push({
+          type: 'Feature',
+          properties: { id: gf.id, label: gf.label },
+          geometry: { type: 'Polygon', coordinates: [ring] },
+        });
+      } else if (gf.mode === 'country' && gf.bbox) {
+        const { north, south, east, west } = gf.bbox;
+        geoFeatures.push({
+          type: 'Feature',
+          properties: { id: gf.id, label: gf.label },
+          geometry: {
+            type: 'Polygon',
+            coordinates: [[
+              [west, north], [east, north], [east, south], [west, south], [west, north],
+            ]],
+          },
+        });
+      }
+    }
+
+    const fc: FeatureCollection = { type: 'FeatureCollection', features: geoFeatures };
+
+    // Update or create source + layers
+    const src = map.getSource(GEO_OUTLINE_SOURCE);
+    if (src && 'setData' in src) {
+      (src as { setData: (data: FeatureCollection) => void }).setData(fc);
+    } else {
+      map.addSource(GEO_OUTLINE_SOURCE, { type: 'geojson', data: fc });
+      map.addLayer({
+        id: GEO_OUTLINE_FILL,
+        type: 'fill',
+        source: GEO_OUTLINE_SOURCE,
+        paint: {
+          'fill-color': '#3b82f6',
+          'fill-opacity': 0.08,
+        },
+      });
+      map.addLayer({
+        id: GEO_OUTLINE_LINE,
+        type: 'line',
+        source: GEO_OUTLINE_SOURCE,
+        paint: {
+          'line-color': '#3b82f6',
+          'line-width': 2,
+          'line-dasharray': [4, 3],
+          'line-opacity': 0.7,
+        },
+      });
+    }
+  }
+
+  // Update outlines on every filter change
+  filterEngine.addEventListener('change', updateGeoFilterOutlines);
+  // Re-create source/layers after style switch (setStyle destroys all layers)
+  engine.map.on('style.load', () => setTimeout(updateGeoFilterOutlines, 100));
+
+  // ── 12. Views & saved-filters persistence (backend API) ────────────────
+  filterEngine.setApiBaseUrl(Config.apiBaseUrl);
   filterEngine.addEventListener('views-change', () => {
     filterPanel.render();
   });
 
-  // Load saved views + saved filters from ES on boot
-  filterEngine.loadFromES().then(() => {
+  // Load saved views + saved filters from backend on boot
+  filterEngine.loadFromBackend().then(() => {
     filterPanel.render();
   }).catch(() => { /* config not yet saved */ });
 
@@ -362,7 +481,7 @@ async function boot(): Promise<void> {
       const query = activeFilters.length > 0
         ? filterEngine.buildQuery(indexId)
         : undefined;
-      const count = await esClient.count(indexId, query);
+      const count = await apiClient.count(indexId, query);
 
       if (count > 10_000) {
         showToast(
@@ -377,13 +496,13 @@ async function boot(): Promise<void> {
 
       // Detect geo fields (use cache if available)
       const geoFields = geoFieldsCache.get(indexId)
-        ?? await esClient.detectGeoFields(indexId);
+        ?? await apiClient.detectGeoFields(indexId);
       geoFieldsCache.set(indexId, geoFields);
 
       if (geoFields.length === 0) {
         // No geo field — load sample for data panel / filters only
         console.log(`[FleetTracker] Index "${indexId}" has no geo fields – loading sample only.`);
-        const resp = await esClient.search({ index: indexId, query, size: 100 });
+        const resp = await apiClient.search({ index: indexId, query, size: 100 });
         const features: Feature[] = resp.hits.hits.map(hit => ({
           type: 'Feature' as const,
           geometry: { type: 'Point' as const, coordinates: [0, 0] },
@@ -393,9 +512,9 @@ async function boot(): Promise<void> {
         dataStore.set(indexId, features);
       } else {
         const geoField = geoFields[0];
-        const geoType = await esClient.detectGeoType(indexId, geoField) ?? 'point';
+        const geoType = await apiClient.detectGeoType(indexId, geoField) ?? 'point';
 
-        const features = await esClient.searchAsGeoJSON({
+        const features = await apiClient.searchAsGeoJSON({
           index: indexId,
           geoField,
           query,
@@ -442,7 +561,7 @@ async function boot(): Promise<void> {
   }
 
   // ── 14. Expose globals for debugging ───────────────────────────────────
-  Object.assign(window, { ft: { engine, layerRegistry, dataStore, filterEngine, esClient } });
+  Object.assign(window, { ft: { engine, layerRegistry, dataStore, filterEngine, apiClient } });
 
   console.log('[FleetTracker] Boot complete');
 }

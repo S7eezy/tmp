@@ -12,10 +12,9 @@ import type {
 import type { Feature } from 'geojson';
 
 // ---------------------------------------------------------------------------
-// ES persistence constants
+// Backend config persistence constants
 // ---------------------------------------------------------------------------
 
-const CONFIG_INDEX = '.fleettracker-config';
 const VIEWS_DOC_ID = 'filter-views';
 const SAVED_FILTERS_DOC_ID = 'saved-filters';
 
@@ -33,6 +32,24 @@ export function newFilterId(): string { return `flt-${_seq++}`; }
 export class FilterEngine extends EventTarget {
   private _filters: ActiveFilter[] = [];
   private _views: FilterView[] = [];
+
+  /**
+   * Per-index timestamp field overrides.
+   * When building time filter queries/predicates for a specific index,
+   * this field is used instead of the filter's default `field` property.
+   */
+  private _timestampFields = new Map<string, string>();
+
+  /** Set the timestamp field for a specific index. */
+  setTimestampField(indexId: string, field: string): void {
+    this._timestampFields.set(indexId, field);
+    this._emit();
+  }
+
+  /** Get the timestamp field for a specific index (falls back to filter default). */
+  getTimestampField(indexId: string): string | undefined {
+    return this._timestampFields.get(indexId);
+  }
 
   // -------------------------------------------------------------------------
   // Read accessors
@@ -206,15 +223,23 @@ export class FilterEngine extends EventTarget {
   buildQuery(index: string): Record<string, unknown> {
     const applicable = this.getFiltersForIndex(index);
     if (applicable.length === 0) return { match_all: {} };
-    return { bool: { must: applicable.map(f => this._toClause(f)) } };
+    return { bool: { must: applicable.map(f => this._toClause(f, index)) } };
   }
 
-  private _toClause(f: ActiveFilter): Record<string, unknown> {
+  private _toClause(f: ActiveFilter, index?: string): Record<string, unknown> {
     switch (f.kind) {
       case 'geo':   return this._geoClause(f);
-      case 'time':  return this._timeClause(f);
+      case 'time':  return this._timeClause(this._resolveTimeField(f, index));
       case 'value': return this._valueClause(f);
     }
+  }
+
+  /** Resolve the time filter field for a specific index (per-index override). */
+  private _resolveTimeField(f: TimeFilter, index?: string): TimeFilter {
+    if (!index) return f;
+    const override = this._timestampFields.get(index);
+    if (override && override !== f.field) return { ...f, field: override };
+    return f;
   }
 
   private _geoClause(f: GeoFilter): Record<string, unknown> {
@@ -295,14 +320,14 @@ export class FilterEngine extends EventTarget {
   buildClientPredicate(index: string): (f: Feature) => boolean {
     const applicable = this.getFiltersForIndex(index);
     if (applicable.length === 0) return () => true;
-    const preds = applicable.map(f => this._toPredicate(f));
+    const preds = applicable.map(f => this._toPredicateFor(f, index));
     return feat => preds.every(p => p(feat));
   }
 
-  private _toPredicate(f: ActiveFilter): (feat: Feature) => boolean {
+  private _toPredicateFor(f: ActiveFilter, index: string): (feat: Feature) => boolean {
     switch (f.kind) {
       case 'geo':   return this._geoPredicate(f);
-      case 'time':  return this._timePredicate(f);
+      case 'time':  return this._timePredicate(this._resolveTimeField(f, index));
       case 'value': return this._valuePredicate(f);
     }
   }
@@ -399,45 +424,31 @@ export class FilterEngine extends EventTarget {
   }
 
   // -------------------------------------------------------------------------
-  // Elasticsearch persistence
+  // Backend API persistence
   // -------------------------------------------------------------------------
 
-  private _esBaseUrl: string | null = null;
+  private _apiBaseUrl: string | null = null;
 
-  /** Set the ES base URL to enable ES persistence. */
-  setEsBaseUrl(url: string): void {
-    this._esBaseUrl = url.replace(/\/$/, '');
+  /** Set the backend API base URL to enable config persistence. */
+  setApiBaseUrl(url: string): void {
+    this._apiBaseUrl = url.replace(/\/$/, '');
   }
 
-  /** Ensure the config index exists (HEAD check, create only if missing). */
-  private async _ensureConfigIndex(): Promise<void> {
-    if (!this._esBaseUrl) return;
-    try {
-      const head = await fetch(`${this._esBaseUrl}/${CONFIG_INDEX}`, { method: 'HEAD' });
-      if (head.ok) return;
-      await fetch(`${this._esBaseUrl}/${CONFIG_INDEX}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ settings: { number_of_shards: 1, number_of_replicas: 0 } }),
-      });
-    } catch { /* ignore */ }
-  }
-
-  /** Load saved views + saved filters from ES. */
-  async loadFromES(): Promise<void> {
-    if (!this._esBaseUrl) return;
+  /** Load saved views + saved filters from backend. */
+  async loadFromBackend(): Promise<void> {
+    if (!this._apiBaseUrl) return;
     try {
       const [viewsRes, filtersRes] = await Promise.all([
-        fetch(`${this._esBaseUrl}/${CONFIG_INDEX}/_doc/${VIEWS_DOC_ID}`),
-        fetch(`${this._esBaseUrl}/${CONFIG_INDEX}/_doc/${SAVED_FILTERS_DOC_ID}`),
+        fetch(`${this._apiBaseUrl}/config/${VIEWS_DOC_ID}`),
+        fetch(`${this._apiBaseUrl}/config/${SAVED_FILTERS_DOC_ID}`),
       ]);
       if (viewsRes.ok) {
         const doc = await viewsRes.json();
-        this._views = doc._source?.views ?? [];
+        this._views = doc.views ?? [];
       }
       if (filtersRes.ok) {
         const doc = await filtersRes.json();
-        this._savedFilters = doc._source?.filters ?? [];
+        this._savedFilters = doc.filters ?? [];
       }
       this._emitViews();
     } catch {
@@ -445,33 +456,31 @@ export class FilterEngine extends EventTarget {
     }
   }
 
-  /** Persist saved views to ES. */
-  private async _saveViewsToES(): Promise<void> {
-    if (!this._esBaseUrl) return;
+  /** Persist saved views to backend. */
+  private async _saveViews(): Promise<void> {
+    if (!this._apiBaseUrl) return;
     try {
-      await this._ensureConfigIndex();
-      await fetch(`${this._esBaseUrl}/${CONFIG_INDEX}/_doc/${VIEWS_DOC_ID}`, {
+      await fetch(`${this._apiBaseUrl}/config/${VIEWS_DOC_ID}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ views: this._views }),
       });
     } catch (err) {
-      console.error('[FilterEngine] Failed to save views to ES:', err);
+      console.error('[FilterEngine] Failed to save views:', err);
     }
   }
 
-  /** Persist saved filters library to ES. */
-  private async _saveSavedFiltersToES(): Promise<void> {
-    if (!this._esBaseUrl) return;
+  /** Persist saved filters library to backend. */
+  private async _saveSavedFilters(): Promise<void> {
+    if (!this._apiBaseUrl) return;
     try {
-      await this._ensureConfigIndex();
-      await fetch(`${this._esBaseUrl}/${CONFIG_INDEX}/_doc/${SAVED_FILTERS_DOC_ID}`, {
+      await fetch(`${this._apiBaseUrl}/config/${SAVED_FILTERS_DOC_ID}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filters: this._savedFilters }),
       });
     } catch (err) {
-      console.error('[FilterEngine] Failed to save filters to ES:', err);
+      console.error('[FilterEngine] Failed to save filters:', err);
     }
   }
 
@@ -489,9 +498,9 @@ export class FilterEngine extends EventTarget {
     this.dispatchEvent(new CustomEvent('views-change', {
       detail: { views: this.views },
     }));
-    // Fire-and-forget ES persistence
-    this._saveViewsToES();
-    this._saveSavedFiltersToES();
+    // Fire-and-forget backend persistence
+    this._saveViews();
+    this._saveSavedFilters();
   }
 }
 

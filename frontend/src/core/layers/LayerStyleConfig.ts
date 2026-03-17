@@ -53,25 +53,23 @@ export interface LayerStyleConfig {
 }
 
 // ---------------------------------------------------------------------------
-// ES persistence
+// Backend API persistence
 // ---------------------------------------------------------------------------
 
-const CONFIG_INDEX = '.fleettracker-config';
 const CONFIG_DOC_ID = 'layer-styles';
 
 export interface LayerStylesDoc {
   styles: LayerStyleConfig[];
 }
 
-/** Load all layer styles from ES. */
-export async function loadLayerStyles(esBaseUrl: string): Promise<Map<string, LayerStyleConfig>> {
+/** Load all layer styles from backend API. */
+export async function loadLayerStyles(apiBaseUrl: string): Promise<Map<string, LayerStyleConfig>> {
   const map = new Map<string, LayerStyleConfig>();
   try {
-    const res = await fetch(`${esBaseUrl}/${CONFIG_INDEX}/_doc/${CONFIG_DOC_ID}`);
+    const res = await fetch(`${apiBaseUrl}/config/${CONFIG_DOC_ID}`);
     if (res.ok) {
       const doc = await res.json();
-      const body = doc._source as LayerStylesDoc;
-      for (const s of body.styles ?? []) {
+      for (const s of (doc as LayerStylesDoc).styles ?? []) {
         map.set(s.layerId, s);
       }
     }
@@ -81,29 +79,13 @@ export async function loadLayerStyles(esBaseUrl: string): Promise<Map<string, La
   return map;
 }
 
-/** Ensure the config index exists (creates only if missing). */
-async function ensureConfigIndex(esBaseUrl: string): Promise<void> {
-  try {
-    const head = await fetch(`${esBaseUrl}/${CONFIG_INDEX}`, { method: 'HEAD' });
-    if (head.ok) return; // already exists
-    await fetch(`${esBaseUrl}/${CONFIG_INDEX}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ settings: { number_of_shards: 1, number_of_replicas: 0 } }),
-    });
-  } catch { /* ignore – ES might be unreachable */ }
-}
-
-/** Save all layer styles to ES (shared across all users). */
+/** Save all layer styles to backend API. */
 export async function saveLayerStyles(
-  esBaseUrl: string,
+  apiBaseUrl: string,
   styles: Map<string, LayerStyleConfig>,
 ): Promise<void> {
   const body: LayerStylesDoc = { styles: [...styles.values()] };
-
-  await ensureConfigIndex(esBaseUrl);
-
-  await fetch(`${esBaseUrl}/${CONFIG_INDEX}/_doc/${CONFIG_DOC_ID}`, {
+  await fetch(`${apiBaseUrl}/config/${CONFIG_DOC_ID}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

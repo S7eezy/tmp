@@ -7,7 +7,6 @@ import type { DeckLayerAdapter, LayerStyleConfig, LabelConfig } from '@core/laye
 import { getIconsByCategory, CATEGORY_LABELS } from '@core/layers';
 import type { LayerRegistry } from '@core/layers';
 import type { DataStore } from '@core/data';
-import type { ElasticClient } from '@core/data';
 import { saveLayerStyles, loadLayerStyles } from '@core/layers';
 import { Config } from '../config';
 
@@ -24,7 +23,7 @@ export class LayerStyleModal {
   constructor(opts: {
     layerRegistry: LayerRegistry;
     dataStore: DataStore;
-    esClient: ElasticClient;
+    apiClient?: unknown;
     onStyleChange: () => void;
   }) {
     this._reg = opts.layerRegistry;
@@ -32,9 +31,9 @@ export class LayerStyleModal {
     this._onStyleChange = opts.onStyleChange;
   }
 
-  /** Load styles from ES on startup. */
-  async loadFromES(): Promise<void> {
-    this._styles = await loadLayerStyles(Config.esBaseUrl);
+  /** Load styles from backend on startup. */
+  async loadFromBackend(): Promise<void> {
+    this._styles = await loadLayerStyles(Config.apiBaseUrl);
     // Apply loaded styles to existing layers
     for (const [id, style] of this._styles) {
       const layer = this._reg.get<DeckLayerAdapter>(id);
@@ -110,7 +109,7 @@ export class LayerStyleModal {
       this._styles.delete(layerId);
       layer.setStyle(null);
       this._onStyleChange();
-      this._saveToES();
+      this._saveToBackend();
       overlay.style.display = 'none';
     });
 
@@ -120,7 +119,7 @@ export class LayerStyleModal {
       this._styles.set(layerId, style);
       layer.setStyle(style);
       this._onStyleChange();
-      this._saveToES();
+      this._saveToBackend();
       overlay.style.display = 'none';
     });
 
@@ -526,9 +525,9 @@ export class LayerStyleModal {
     return fields;
   }
 
-  private async _saveToES(): Promise<void> {
+  private async _saveToBackend(): Promise<void> {
     try {
-      await saveLayerStyles(Config.esBaseUrl, this._styles);
+      await saveLayerStyles(Config.apiBaseUrl, this._styles);
     } catch (err) {
       console.error('[LayerStyleModal] Failed to save styles:', err);
     }

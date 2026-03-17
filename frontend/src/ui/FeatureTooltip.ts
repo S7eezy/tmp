@@ -137,15 +137,32 @@ export class FeatureTooltip {
     this._show(info);
   }
 
+  /** Hide the tooltip and clear pinned state. */
+  dismiss(): void {
+    this._pinned = null;
+    this._tooltipEl.classList.remove('visible');
+  }
+
   private _show(info: PinnedTooltip): void {
     const { feature, sourceId } = info;
     const props = feature.properties ?? {};
     const el = this._tooltipEl;
 
     const config = this._settings.getConfig(sourceId);
-    const entries = Object.entries(props).filter(([key]) => {
-      return config.attributes[key] !== false;
-    });
+
+    // Use fieldOrder for display order if available, falling back to Object.keys
+    const orderedKeys = config.fieldOrder ?? Object.keys(config.attributes);
+    const entries: [string, unknown][] = [];
+    for (const key of orderedKeys) {
+      if (config.attributes[key] === false) continue;
+      if (key in props) entries.push([key, props[key]]);
+    }
+    // Also include any keys present in props but not in fieldOrder (new fields)
+    for (const key of Object.keys(props)) {
+      if (!orderedKeys.includes(key) && config.attributes[key] !== false) {
+        entries.push([key, props[key]]);
+      }
+    }
 
     el.innerHTML = '';
 

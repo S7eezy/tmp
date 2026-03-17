@@ -2,16 +2,16 @@ import { defineConfig, loadEnv } from 'vite';
 import { resolve } from 'path';
 
 export default defineConfig(({ mode }) => {
-  // Load all .env variables (no prefix filter) so server-side proxy targets
-  // can be overridden without the VITE_ prefix restriction.
+  // Load all .env variables (no prefix filter) so we can read the runtime
+  // service URLs (BACKEND_URL, GEOSERVER_URL, TILESERVER_URL) for dev proxy.
+  // These are NOT the VITE_ build-time vars (which are relative paths).
   const env = loadEnv(mode, resolve(__dirname, '..'), '');
 
-  // In Docker Compose the container environment sets these to the service names.
-  // For frontend-only dev (npm run dev outside Docker) set them in .env to
-  // the locally reachable addresses (e.g. http://localhost:9200).
-  const esTarget = env.VITE_ES_BASE_URL ?? 'http://elasticsearch:9200';
-  const geoserverTarget = env.VITE_GEOSERVER_URL ?? 'http://geoserver:8080/geoserver';
-  const tileserverTarget = env.VITE_TILESERVER_URL ?? 'http://tileserver:8080';
+  // Dev proxy targets — actual service URLs for local development.
+  // Override via BACKEND_URL / GEOSERVER_URL / TILESERVER_URL in root .env.
+  const backendTarget    = env.BACKEND_URL    || 'http://localhost:8000';
+  const geoserverTarget  = env.GEOSERVER_URL  || 'http://localhost:8080';
+  const tileserverTarget = env.TILESERVER_URL || 'http://localhost:8081';
 
   return {
   resolve: {
@@ -25,21 +25,21 @@ export default defineConfig(({ mode }) => {
     host: '0.0.0.0',
     port: 5173,
     proxy: {
-      '/api/es': {
-        target: esTarget,
-        changeOrigin: true,
-        secure: false,
-        rewrite: (path) => path.replace(/^\/api\/es/, ''),
-      },
+      // Longer prefixes first so they match before the /api catch-all
       '/api/geoserver': {
         target: geoserverTarget,
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/geoserver/, ''),
+        rewrite: (path) => path.replace(/^\/api\/geoserver/, '/geoserver'),
       },
       '/api/tiles': {
         target: tileserverTarget,
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/tiles/, ''),
+      },
+      '/api': {
+        target: backendTarget,
+        changeOrigin: true,
+        secure: false,
       },
     },
   },

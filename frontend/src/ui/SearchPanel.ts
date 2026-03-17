@@ -1,5 +1,6 @@
 // ---------------------------------------------------------------------------
 // SearchPanel – full-text search across all data sources (dropdown UI).
+// Hover on a result → tooltip + fly-to. Click → pin tooltip + close search.
 // ---------------------------------------------------------------------------
 
 import type { MapEngine } from '@core/map';
@@ -43,6 +44,29 @@ export class SearchPanel {
             item.className = 'search-result-item';
             item.innerHTML = `<span class="search-result-source">${sourceId}</span> <span class="search-result-name">${props.name || props._id || 'unnamed'}</span>`;
 
+            // ── Hover → tooltip + fly-to ─────────────────────────────
+            item.addEventListener('mouseenter', () => {
+              // Fly to feature
+              if (f.geometry.type === 'Point') {
+                const [lng, lat] = f.geometry.coordinates as [number, number];
+                this._engine.flyTo([lng, lat], 8);
+              }
+
+              // Show tooltip positioned to the right of the search result item
+              const rect = item.getBoundingClientRect();
+              this._tooltip.showFor({
+                x: rect.right + 8,
+                y: rect.top,
+                feature: f,
+                sourceId,
+              });
+            });
+
+            item.addEventListener('mouseleave', () => {
+              this._tooltip.dismiss();
+            });
+
+            // ── Click → pin tooltip + close search ───────────────────
             item.addEventListener('click', () => {
               if (f.geometry.type === 'Point') {
                 const [lng, lat] = f.geometry.coordinates as [number, number];
@@ -54,6 +78,9 @@ export class SearchPanel {
                   : [0, 0],
               );
               this._tooltip.showFor({ x: center.x, y: center.y, feature: f, sourceId });
+
+              // Close search dropdown
+              document.getElementById('search-dropdown')?.classList.remove('is-open');
             });
 
             results.appendChild(item);
