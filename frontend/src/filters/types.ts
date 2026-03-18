@@ -84,6 +84,18 @@ export interface FilterView {
   filters: ActiveFilter[];
   /** Whether this view is currently active (toggled on). */
   active: boolean;
+
+  // ── Extended state (saved with the view) ──────────────────────────────
+  /** ES indexes that were enabled (visible in DATA panel) at save time. */
+  enabledIndexes?: string[];
+  /** ES indexes that were loaded (data fetched) at save time. */
+  loadedIndexes?: string[];
+  /** Per-layer visibility at save time: layerId → visible. */
+  layerVisibility?: Record<string, boolean>;
+  /** Active basemap style id at save time. */
+  activeMapStyle?: string | null;
+  /** Whether this view is a favourite (pinned to top). */
+  favourite?: boolean;
 }
 
 // -- Attribute visibility config (per-index) ---------------------------------

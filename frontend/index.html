@@ -20,6 +20,12 @@
     <!-- Top-center toolbar                                                 -->
     <!-- ================================================================= -->
     <div id="toolbar" class="toolbar">
+      <button class="toolbar__btn" id="tb-views" title="Views">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+        </svg>
+      </button>
+      <div class="toolbar__separator"></div>
       <button class="toolbar__btn" id="tb-filters" data-panel="filters" title="Filters (left)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
@@ -32,19 +38,22 @@
         </svg>
       </button>
       <div class="toolbar__separator"></div>
-      <button class="toolbar__btn" id="tb-time" title="Time filter">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="10"/>
-          <polyline points="12 6 12 12 16 14"/>
-        </svg>
-      </button>
-      <span class="toolbar__label" id="tb-time-label">Last 30 min</span>
-      <div class="toolbar__separator"></div>
       <button class="toolbar__btn" id="tb-layers" data-panel="layers" title="Layers (right)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 2L2 7l10 5 10-5-10-5z"/>
           <path d="M2 17l10 5 10-5"/>
           <path d="M2 12l10 5 10-5"/>
+        </svg>
+      </button>
+      <div class="toolbar__separator"></div>
+      <button class="toolbar__btn toolbar__btn--time" id="tb-time" title="Time filter">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <polyline points="12 6 12 12 16 14"/>
+        </svg>
+        <span class="toolbar__time-label" id="tb-time-label">Last 30 h</span>
+        <svg class="toolbar__time-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12">
+          <polyline points="6 9 12 15 18 9"/>
         </svg>
       </button>
     </div>
@@ -102,8 +111,18 @@
           </svg>
         </button>
       </div>
-      <!-- Section 1: Layers -->
-      <div class="sp-section" data-section="layers">
+      <!-- Section 1: Data (ES indexes) — uncollapsed by default -->
+      <div class="sp-section" data-section="data">
+        <div class="sp-section__header" data-toggle="data">
+          <span class="sp-section__title">Data</span>
+          <span class="sp-section__count" id="sp-data-count">0</span>
+          <svg class="sp-section__chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="sp-section__body" id="sp-data-body"></div>
+      </div>
+
+      <!-- Section 2: Layers (GeoServer WMS) — collapsed by default -->
+      <div class="sp-section collapsed" data-section="layers">
         <div class="sp-section__header" data-toggle="layers">
           <span class="sp-section__title">Layers</span>
           <span class="sp-section__count" id="sp-layers-count">0</span>
@@ -112,24 +131,14 @@
         <div class="sp-section__body" id="sp-layers-body"></div>
       </div>
 
-      <!-- Section 2: Tiles -->
-      <div class="sp-section" data-section="tiles">
+      <!-- Section 3: Tiles (TileServer GL) — collapsed by default -->
+      <div class="sp-section collapsed" data-section="tiles">
         <div class="sp-section__header" data-toggle="tiles">
           <span class="sp-section__title">Tiles</span>
           <span class="sp-section__count" id="sp-tiles-count">0</span>
           <svg class="sp-section__chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
         </div>
         <div class="sp-section__body" id="sp-tiles-body"></div>
-      </div>
-
-      <!-- Section 3: Data -->
-      <div class="sp-section" data-section="data">
-        <div class="sp-section__header" data-toggle="data">
-          <span class="sp-section__title">Data</span>
-          <span class="sp-section__count" id="sp-data-count">0</span>
-          <svg class="sp-section__chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-        </div>
-        <div class="sp-section__body" id="sp-data-body"></div>
       </div>
     </div>
 
@@ -160,6 +169,23 @@
           </button>
         </div>
         <div class="settings-modal__body" id="settings-body"></div>
+      </div>
+    </div>
+
+    <!-- ================================================================= -->
+    <!-- Views modal (toolbar views button)                               -->
+    <!-- ================================================================= -->
+    <div id="views-overlay" class="views-overlay" style="display:none">
+      <div class="views-modal">
+        <div class="views-modal__header">
+          <span class="views-modal__title" id="views-title">Views</span>
+          <button class="views-modal__close" id="views-close" title="Close">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+        <div class="views-modal__body" id="views-body"></div>
       </div>
     </div>
 

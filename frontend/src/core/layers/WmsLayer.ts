@@ -75,8 +75,9 @@ export class WmsLayerAdapter implements BaseLayer {
         this._engine.addWmsLayer(this.meta.id, this._wmsUrl, this._wmsParams, {
           opacity: this.meta.opacity,
         });
+      } else {
+        this._engine.removeWmsLayer(this.meta.id);
       }
-      this._engine.setLayerVisibility(this.meta.id, v);
     }
     return true;
   }

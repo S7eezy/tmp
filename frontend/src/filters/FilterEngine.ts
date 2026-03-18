@@ -149,8 +149,13 @@ export class FilterEngine extends EventTarget {
   // Views – save/load/toggle named filter combinations
   // -------------------------------------------------------------------------
 
-  /** Save current filters as a named view. */
-  saveView(name: string, description?: string): FilterView {
+  /** Save current filters + UI state as a named view. */
+  saveView(name: string, description?: string, extraState?: {
+    enabledIndexes?: string[];
+    loadedIndexes?: string[];
+    layerVisibility?: Record<string, boolean>;
+    activeMapStyle?: string | null;
+  }): FilterView {
     // Remove existing view with same name
     this._views = this._views.filter(v => v.name !== name);
     const view: FilterView = {
@@ -159,6 +164,10 @@ export class FilterEngine extends EventTarget {
       description,
       filters: JSON.parse(JSON.stringify(this._filters)),
       active: false,
+      enabledIndexes: extraState?.enabledIndexes,
+      loadedIndexes: extraState?.loadedIndexes,
+      layerVisibility: extraState?.layerVisibility,
+      activeMapStyle: extraState?.activeMapStyle,
     };
     this._views.push(view);
     this._emitViews();
@@ -175,22 +184,40 @@ export class FilterEngine extends EventTarget {
     for (const f of this._filters) f.id = newFilterId();
     // Mark this view as active, others as inactive
     for (const v of this._views) v.active = v.name === name;
+    // Emit view-apply so main.ts can restore indexes/layers/tiles
+    this._emitViewApply(view);
     this._emit();
     this._emitViews();
   }
 
-  /** Toggle a view on/off. On = load its filters; Off = clear filters. */
+  /**
+   * Toggle a view on/off.
+   * On = flush everything, then apply the view's full state.
+   * Off = flush everything (filters + indexes + layers).
+   */
   toggleView(name: string): void {
     const view = this._views.find(v => v.name === name);
     if (!view) return;
     if (view.active) {
       view.active = false;
       this._filters = [];
+      // Emit flush event so main.ts unloads all indexes + hides layers
+      this._emitViewFlush();
       this._emit();
       this._emitViews();
     } else {
+      // Flush first, then load
+      this._emitViewFlush();
       this.loadView(name);
     }
+  }
+
+  /** Toggle a view's favourite status. */
+  toggleFavourite(name: string): void {
+    const view = this._views.find(v => v.name === name);
+    if (!view) return;
+    view.favourite = !view.favourite;
+    this._emitViews();
   }
 
   /** Remove a saved view. */
@@ -501,6 +528,23 @@ export class FilterEngine extends EventTarget {
     // Fire-and-forget backend persistence
     this._saveViews();
     this._saveSavedFilters();
+  }
+
+  /** Emitted when a view is loaded — carries the full saved state for main.ts to restore. */
+  private _emitViewApply(view: FilterView): void {
+    this.dispatchEvent(new CustomEvent('view-apply', {
+      detail: {
+        enabledIndexes: view.enabledIndexes ?? [],
+        loadedIndexes: view.loadedIndexes ?? [],
+        layerVisibility: view.layerVisibility ?? {},
+        activeMapStyle: view.activeMapStyle ?? null,
+      },
+    }));
+  }
+
+  /** Emitted before a view toggle — tells main.ts to unload all indexes + hide all layers. */
+  private _emitViewFlush(): void {
+    this.dispatchEvent(new CustomEvent('view-flush'));
   }
 }
 

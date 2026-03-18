@@ -96,7 +96,8 @@ def _to_geometry(geo: Any) -> dict[str, Any] | None:
 
     Supports:
       - geo_point as {lat, lon}
-      - geo_point as [lon, lat]
+      - geo_point as [lon, lat]  or  [lon, lat, alt]
+      - geo_point as "lat,lon" string
       - geo_shape as raw GeoJSON geometry (passthrough)
     """
     if isinstance(geo, dict):
@@ -106,11 +107,47 @@ def _to_geometry(geo: Any) -> dict[str, Any] | None:
                 "coordinates": [float(geo["lon"]), float(geo["lat"])],
             }
         if "type" in geo:
-            # Already a GeoJSON geometry — pass through
-            return geo
-    if isinstance(geo, list) and len(geo) == 2 and isinstance(geo[0], (int, float)):
+            # Already a GeoJSON geometry — normalise 3-D coords to 2-D for
+            # deck.gl / MapLibre compatibility.
+            return _normalise_geojson(geo)
+    # ES geo_point as [lon, lat] or [lon, lat, alt]
+    if isinstance(geo, list) and len(geo) in (2, 3) and all(isinstance(v, (int, float)) for v in geo):
         return {"type": "Point", "coordinates": [geo[0], geo[1]]}
+    # ES geo_point as "lat,lon" string
+    if isinstance(geo, str) and "," in geo:
+        parts = geo.split(",")
+        if len(parts) == 2:
+            try:
+                lat, lon = float(parts[0].strip()), float(parts[1].strip())
+                return {"type": "Point", "coordinates": [lon, lat]}
+            except ValueError:
+                pass
     return None
+
+
+def _normalise_geojson(geo: dict[str, Any]) -> dict[str, Any]:
+    """Strip altitude (3rd coordinate) from GeoJSON coordinates.
+
+    deck.gl and MapLibre expect 2-D [lon, lat] coordinates.
+    ES geo_shape can store 3-D [lon, lat, alt] — normalise them.
+    """
+    coords = geo.get("coordinates")
+    if coords is None:
+        return geo
+    geo_type = geo.get("type", "")
+    try:
+        if geo_type in ("Point",):
+            if isinstance(coords, list) and len(coords) >= 3:
+                return {**geo, "coordinates": coords[:2]}
+        elif geo_type in ("MultiPoint", "LineString"):
+            return {**geo, "coordinates": [c[:2] if len(c) >= 3 else c for c in coords]}
+        elif geo_type in ("MultiLineString", "Polygon"):
+            return {**geo, "coordinates": [[c[:2] if len(c) >= 3 else c for c in ring] for ring in coords]}
+        elif geo_type in ("MultiPolygon",):
+            return {**geo, "coordinates": [[[c[:2] if len(c) >= 3 else c for c in ring] for ring in poly] for poly in coords]}
+    except (TypeError, IndexError):
+        pass  # Malformed coordinates — return as-is
+    return geo
 
 
 # ---------------------------------------------------------------------------

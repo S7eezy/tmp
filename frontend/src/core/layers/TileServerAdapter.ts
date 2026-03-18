@@ -67,8 +67,11 @@ export class TileServerAdapter implements BaseLayer {
     if (this.meta.visible === v) return false;
     this.meta.visible = v;
     if (this._engine) {
-      if (v) this._addToMap();
-      this._engine.setLayerVisibility(this.meta.id, v);
+      if (v) {
+        this._addToMap();
+      } else {
+        this._engine.removeTileLayer(this.meta.id);
+      }
     }
     return true;
   }

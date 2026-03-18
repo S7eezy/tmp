@@ -34,7 +34,8 @@ export class Toolbar {
   }
 
   setup(): void {
-    document.querySelectorAll<HTMLButtonElement>('.toolbar__btn').forEach(btn => {
+    // Only bind toolbar toggle for buttons that manage side-panels/dropdown
+    document.querySelectorAll<HTMLButtonElement>('.toolbar__btn[data-panel]').forEach(btn => {
       btn.addEventListener('click', () => {
         const panel = btn.dataset.panel as PanelName;
         this._activePanel === panel ? this.closeAll() : this.open(panel);
@@ -56,6 +57,7 @@ export class Toolbar {
     });
 
     this._setupEdgeHover();
+    this._setupBodyClassObserver();
   }
 
   open(panel: PanelName): void {
@@ -125,9 +127,44 @@ export class Toolbar {
     const mapEl = document.getElementById('map');
     if (!mapEl) return;
     mapEl.addEventListener('click', (e: MouseEvent) => {
+      // Don't close panels while drawing polygons/bboxes
+      if (document.body.classList.contains('draw-mode')) return;
       if (this._activePanel && (e.target as HTMLElement).closest('#map') === mapEl) {
         this.closeAll();
       }
+    });
+  }
+
+  // ── Body class observer → sync toolbar button highlights ────────────────
+  // Panels can be closed by many means (close button, map click, edge hover,
+  // Escape key, etc.). Instead of tracking every path, observe the body
+  // classList which is the source of truth for panel visibility.
+
+  private _setupBodyClassObserver(): void {
+    const observer = new MutationObserver(() => {
+      this._syncButtonStates();
+    });
+    observer.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+  }
+
+  /** Sync toolbar button active states from actual panel visibility. */
+  private _syncButtonStates(): void {
+    const layersOpen  = document.body.classList.contains('panel-open');
+    const filtersOpen = document.body.classList.contains('filter-open');
+
+    // Search is tracked by its own dropdown class, not body
+    const searchOpen = document.getElementById('search-dropdown')?.classList.contains('is-open') ?? false;
+
+    // Update _activePanel from truth source
+    if (layersOpen)       this._activePanel = 'layers';
+    else if (filtersOpen) this._activePanel = 'filters';
+    else if (searchOpen)  this._activePanel = 'search';
+    else                  this._activePanel = null;
+
+    // Update data-panel buttons
+    document.querySelectorAll<HTMLButtonElement>('.toolbar__btn[data-panel]').forEach(btn => {
+      const panel = btn.dataset.panel as PanelName;
+      btn.classList.toggle('toolbar__btn--active', panel === this._activePanel);
     });
   }
 

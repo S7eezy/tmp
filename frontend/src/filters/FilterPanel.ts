@@ -10,10 +10,11 @@ import type { Feature } from 'geojson';
 import {
   type ActiveFilter, type GeoFilter, type TimeFilter, type ValueFilter,
   type FilterScope, type TimeMode, type TimeUnit,
-  type ValueFieldType, type ValueOp, type GeoBounds, type FilterView,
+  type ValueFieldType, type ValueOp, type GeoBounds,
 } from './types';
 import { FilterEngine, newFilterId } from './FilterEngine';
 import type { MapEngine } from '@core/map';
+import type { ApiClient } from '@core/data';
 
 // ---------------------------------------------------------------------------
 // Country catalogue (maritime nations, approximate bounding boxes)
@@ -68,7 +69,7 @@ interface FormState {
   timeBefore: string; timeAfter: string;
   timeBetweenFrom: string; timeBetweenTo: string;
   timeLastAmount: string; timeLastUnit: TimeUnit;
-  valueIndex: string;
+  valueIndexes: string[];
   valueField: string;
   valueFieldType: ValueFieldType;
   valueOp: ValueOp;
@@ -91,7 +92,7 @@ function defaultForm(allIndexes: string[]): FormState {
     timeBefore: '', timeAfter: '',
     timeBetweenFrom: '', timeBetweenTo: '',
     timeLastAmount: '24', timeLastUnit: 'hour',
-    valueIndex: allIndexes[0] ?? '',
+    valueIndexes: [...allIndexes],
     valueField: '',
     valueFieldType: 'number',
     valueOp: 'gt',
@@ -124,6 +125,10 @@ export interface FilterPanelOptions {
   onStartDrawPolygon?: () => void;
   onStartDrawBbox?: () => void;
   mapEngine?: MapEngine;
+  /** Returns all enabled DATA indexes (loaded + unloaded). */
+  getEnabledIndexes?: () => string[];
+  /** ApiClient for fetching ES mapping of unloaded indexes. */
+  apiClient?: ApiClient;
 }
 
 export class FilterPanel {
@@ -134,13 +139,15 @@ export class FilterPanel {
   private _onStartDrawPolygon?: () => void;
   private _onStartDrawBbox?: () => void;
   private _mapEngine: MapEngine | null;
+  private _getEnabledIndexes: () => string[];
+  private _apiClient: ApiClient | null;
 
   private _form: FormState;
   private _fieldCache = new Map<string, FieldInfo[]>();
-  private _activeSection: 'filters' | 'views' = 'filters';
-  private _showViewSaveForm = false;
   /** Tracks which saved-filter categories are collapsed (persists across renders). */
   private _collapsedLibraryCats = new Set<string>();
+  /** Set of indexes currently being loaded from ES mapping (async). */
+  private _loadingMappingFor = new Set<string>();
 
   // SVG overlay for geo filter hover preview
   private _hoverSvg: SVGSVGElement | null = null;
@@ -154,7 +161,9 @@ export class FilterPanel {
     this._onStartDrawPolygon = opts.onStartDrawPolygon;
     this._onStartDrawBbox    = opts.onStartDrawBbox;
     this._mapEngine = opts.mapEngine ?? null;
-    this._form = defaultForm(opts.getIndexes());
+    this._getEnabledIndexes = opts.getEnabledIndexes ?? opts.getIndexes;
+    this._apiClient = opts.apiClient ?? null;
+    this._form = defaultForm(this._getEnabledIndexes());
   }
 
   setPolygonPoints(points: Array<[number, number]>): void {
@@ -174,6 +183,40 @@ export class FilterPanel {
     }
   }
 
+  /**
+   * Create and add a geo filter directly from drawn coordinates.
+   * Called by DrawMode when drawing finishes — skips the manual "Add Filter" step.
+   */
+  submitDrawnBbox(a: [number, number], b: [number, number]): void {
+    const n = Math.max(a[1], b[1]), s = Math.min(a[1], b[1]);
+    const w = Math.min(a[0], b[0]), e = Math.max(a[0], b[0]);
+    if ([n, s, w, e].some(isNaN) || n <= s || e <= w) return;
+    const scope = this._getIndexes().length > 0 ? [...this._getIndexes()] : ['*'];
+    const geoField = this._form.geoField || 'location';
+    const filter: GeoFilter = {
+      id: newFilterId(), kind: 'geo', enabled: true, scope, mode: 'bbox',
+      geoField, bbox: { north: n, south: s, west: w, east: e },
+      label: `Bbox ${n.toFixed(1)}°N–${s.toFixed(1)}°N`,
+    };
+    this._engine.add(filter);
+    this._form = defaultForm(this._getIndexes());
+    this.render();
+  }
+
+  submitDrawnPolygon(points: Array<[number, number]>): void {
+    if (points.length < 3) return;
+    const scope = this._getIndexes().length > 0 ? [...this._getIndexes()] : ['*'];
+    const geoField = this._form.geoField || 'location';
+    const filter: GeoFilter = {
+      id: newFilterId(), kind: 'geo', enabled: true, scope, mode: 'polygon',
+      geoField, polygon: points,
+      label: `Polygon (${points.length} pts)`,
+    };
+    this._engine.add(filter);
+    this._form = defaultForm(this._getIndexes());
+    this.render();
+  }
+
   render(): void {
     // Clean up any hover preview (cards are about to be destroyed)
     this._hideGeoPreview();
@@ -190,35 +233,12 @@ export class FilterPanel {
 
     if (this._form.step === 'closed') {
       this._form.scope = [...this._getIndexes()];
-      if (!this._form.valueIndex && this._getIndexes().length > 0) {
-        this._form.valueIndex = this._getIndexes()[0];
+      if (this._form.valueIndexes.length === 0) {
+        this._form.valueIndexes = [...this._getEnabledIndexes()];
       }
     }
 
-    body.appendChild(this._makeTabBar());
-
-    if (this._activeSection === 'filters') {
-      this._renderFiltersSection(body);
-    } else {
-      this._renderViewsSection(body);
-    }
-  }
-
-  private _makeTabBar(): HTMLElement {
-    const bar = _el('div', { class: 'fp-tab-bar' });
-    const filterTab = _el('button', {
-      class: `fp-tab${this._activeSection === 'filters' ? ' fp-tab--active' : ''}`,
-    }, 'Filters');
-    filterTab.addEventListener('click', () => { this._activeSection = 'filters'; this.render(); });
-
-    const viewTab = _el('button', {
-      class: `fp-tab${this._activeSection === 'views' ? ' fp-tab--active' : ''}`,
-    }, 'Views');
-    viewTab.addEventListener('click', () => { this._activeSection = 'views'; this.render(); });
-
-    bar.appendChild(filterTab);
-    bar.appendChild(viewTab);
-    return bar;
+    this._renderFiltersSection(body);
   }
 
   private _renderFiltersSection(body: HTMLElement): void {
@@ -322,106 +342,6 @@ export class FilterPanel {
     }
 
     return area;
-  }
-
-  private _renderViewsSection(body: HTMLElement): void {
-    const views = this._engine.views;
-
-    if (views.length === 0 && !this._showViewSaveForm) {
-      body.appendChild(_el('div', { class: 'fp-empty' }, 'No saved views'));
-    }
-
-    for (const view of views) {
-      body.appendChild(this._makeViewCard(view));
-    }
-
-    if (this._showViewSaveForm) {
-      body.appendChild(this._makeViewSaveForm());
-    } else {
-      const saveArea = _el('div', { class: 'fp-add-area' });
-      const saveBtn = _el('button', { class: 'fp-add-btn' });
-      saveBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg> Save current filters as view`;
-      saveBtn.addEventListener('click', () => { this._showViewSaveForm = true; this.render(); });
-      if (this._engine.count() === 0) {
-        saveBtn.style.opacity = '0.4';
-        saveBtn.style.pointerEvents = 'none';
-      }
-      saveArea.appendChild(saveBtn);
-      body.appendChild(saveArea);
-    }
-  }
-
-  private _makeViewCard(view: FilterView): HTMLElement {
-    const card = _el('div', { class: `fp-card fp-view-card${view.active ? ' fp-view-card--active' : ''}` });
-    const header = _el('div', { class: 'fp-card-header' });
-    const badge = _el('span', { class: 'fp-badge fp-badge--view' }, 'VIEW');
-    const labelEl = _el('span', { class: 'fp-card-label' }, view.name);
-
-    const tog = _el('div', {
-      class: `fp-toggle${view.active ? ' fp-toggle--on' : ''}`,
-      title: view.active ? 'Deactivate view' : 'Activate view',
-    });
-    tog.addEventListener('click', e => {
-      e.stopPropagation();
-      this._engine.toggleView(view.name);
-      this.render();
-    });
-
-    const del = _el('button', { class: 'fp-card-delete', title: 'Remove view' }, '×');
-    del.addEventListener('click', e => {
-      e.stopPropagation();
-      this._engine.removeView(view.name);
-      this.render();
-    });
-
-    header.appendChild(badge);
-    header.appendChild(labelEl);
-    header.appendChild(tog);
-    header.appendChild(del);
-
-    const summary = _el('div', { class: 'fp-card-summary' });
-    const filterCount = view.filters.length;
-    const date = new Date(view.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-    summary.textContent = `${filterCount} filter${filterCount !== 1 ? 's' : ''} · ${date}`;
-    if (view.description) summary.textContent += ` · ${view.description}`;
-
-    card.appendChild(header);
-    card.appendChild(summary);
-    return card;
-  }
-
-  private _makeViewSaveForm(): HTMLElement {
-    const wrap = _el('div', { class: 'fp-form', style: 'padding: 8px;' });
-    const title = _el('div', { class: 'fp-form-title' });
-    title.appendChild(_el('span', {}, 'Save as View'));
-    const cancel = _el('button', { class: 'fp-btn fp-btn--ghost fp-btn--sm' }, 'Cancel');
-    cancel.addEventListener('click', () => { this._showViewSaveForm = false; this.render(); });
-    title.appendChild(cancel);
-    wrap.appendChild(title);
-
-    const formBody = _el('div', { class: 'fp-form-body' });
-    formBody.appendChild(this._makeField('Name',
-      this._makeInput('view-name', 'text', '', 'e.g. Mediterranean Watch'),
-    ));
-    formBody.appendChild(this._makeField('Description (optional)',
-      this._makeInput('view-desc', 'text', '', 'Brief description...'),
-    ));
-    wrap.appendChild(formBody);
-
-    const actions = _el('div', { class: 'fp-form-actions' });
-    const saveBtn = _el('button', { class: 'fp-btn fp-btn--primary' }, 'Save View');
-    saveBtn.addEventListener('click', () => {
-      const nameEl = this._bodyEl.querySelector<HTMLInputElement>('[data-name="view-name"]');
-      const descEl = this._bodyEl.querySelector<HTMLInputElement>('[data-name="view-desc"]');
-      const name = nameEl?.value.trim();
-      if (!name) { _showError('Enter a view name.'); return; }
-      this._engine.saveView(name, descEl?.value.trim() || undefined);
-      this._showViewSaveForm = false;
-      this.render();
-    });
-    actions.appendChild(saveBtn);
-    wrap.appendChild(actions);
-    return wrap;
   }
 
   private _makeCard(f: ActiveFilter): HTMLElement {
@@ -669,9 +589,11 @@ export class FilterPanel {
       card.addEventListener('click', () => {
         this._form.step = t.kind;
         this._form.scope = [...this._getIndexes()];
-        if (t.kind === 'value' && this._getIndexes().length > 0) {
-          this._form.valueIndex = this._getIndexes()[0];
-          this._loadFields(this._form.valueIndex);
+        if (t.kind === 'value') {
+          const enabled = this._getEnabledIndexes();
+          this._form.valueIndexes = [...enabled];
+          // Pre-load fields for all enabled indexes
+          for (const idx of enabled) this._loadFields(idx);
         }
         this.render();
       });
@@ -846,20 +768,66 @@ export class FilterPanel {
     return root;
   }
 
-  // -- Value form with enhanced field picker --
+  // -- Value form with multi-index scope + field picker --
 
   private _makeValueForm(): HTMLElement {
     const root = _el('div', { class: 'fp-form-body' });
-    const indexes = this._getIndexes();
+    const allEnabled = this._getEnabledIndexes();
 
-    root.appendChild(this._makeField('Index', this._makeSelect('value-index',
-      indexes.map(i => ({ value: i, label: i })), this._form.valueIndex,
-      val => { this._readDomIntoForm(); this._form.valueIndex = val; this._form.valueField = ''; this._loadFields(val); this.render(); },
-    )));
+    // ── Index checkbox list ──
+    const indexList = _el('div', { class: 'fp-checklist fp-checklist--compact' });
 
-    this._form.scope = this._form.valueIndex ? [this._form.valueIndex] : [];
+    const allItem = _el('label', { class: 'fp-check-item' });
+    const allCb = _el('input', { type: 'checkbox' }) as HTMLInputElement;
+    allCb.checked = this._form.valueIndexes.length === allEnabled.length && allEnabled.length > 0;
+    allCb.addEventListener('change', () => {
+      this._form.valueIndexes = allCb.checked ? [...allEnabled] : [];
+      // Load fields for newly selected indexes
+      for (const idx of this._form.valueIndexes) this._loadFields(idx);
+      this._form.valueField = '';
+      this.render();
+    });
+    allItem.appendChild(allCb);
+    allItem.appendChild(_el('span', { class: 'fp-check-all' }, 'All indexes'));
+    indexList.appendChild(allItem);
 
-    const fields = this._getFields(this._form.valueIndex);
+    for (const idx of allEnabled) {
+      const item = _el('label', { class: 'fp-check-item' });
+      const cb = _el('input', { type: 'checkbox', 'data-vidx-cb': idx }) as HTMLInputElement;
+      cb.checked = this._form.valueIndexes.includes(idx);
+      cb.addEventListener('change', () => {
+        if (cb.checked) {
+          if (!this._form.valueIndexes.includes(idx)) this._form.valueIndexes.push(idx);
+          this._loadFields(idx);
+        } else {
+          this._form.valueIndexes = this._form.valueIndexes.filter(s => s !== idx);
+        }
+        allCb.checked = this._form.valueIndexes.length === allEnabled.length;
+        this._form.valueField = '';
+        this.render();
+      });
+      item.appendChild(cb);
+      item.appendChild(_el('span', {}, idx));
+      indexList.appendChild(item);
+    }
+    root.appendChild(this._makeField('Indexes', indexList));
+
+    // Update scope from selected indexes
+    this._form.scope = [...this._form.valueIndexes];
+
+    // ── Check if any selected indexes are still loading ──
+    const anyLoading = this._form.valueIndexes.some(idx => this._loadingMappingFor.has(idx));
+    if (anyLoading) {
+      root.appendChild(_el('p', { class: 'fp-hint fp-hint--loading' }, 'Loading fields...'));
+      return root;
+    }
+
+    // ── Common fields across selected indexes ──
+    const fields = this._getCommonFields(this._form.valueIndexes);
+    if (this._form.valueIndexes.length === 0) {
+      root.appendChild(_el('p', { class: 'fp-hint' }, 'Select at least one index'));
+      return root;
+    }
     if (fields.length > 0) {
       if (!fields.find(f => f.name === this._form.valueField)) {
         this._form.valueField = fields[0].name;
@@ -892,7 +860,7 @@ export class FilterPanel {
       const currentField = fields.find(f => f.name === this._form.valueField);
       if (currentField) this._renderValueControls(root, currentField);
     } else {
-      root.appendChild(_el('p', { class: 'fp-hint' }, 'No fields found.'));
+      root.appendChild(_el('p', { class: 'fp-hint' }, 'No common fields found across selected indexes.'));
     }
     return root;
   }
@@ -1051,10 +1019,10 @@ export class FilterPanel {
   }
 
   private _buildValueFilter(): ValueFilter | null {
-    const idx = this._form.valueIndex, field = this._form.valueField;
+    const idxs = this._form.valueIndexes, field = this._form.valueField;
     const ftype = this._form.valueFieldType, op = this._form.valueOp as ValueOp;
-    if (!idx || !field) { _showError('Select index and field.'); return null; }
-    const scope: FilterScope = [idx];
+    if (idxs.length === 0 || !field) { _showError('Select index(es) and field.'); return null; }
+    const scope: FilterScope = [...idxs];
     if (op === 'in' || op === 'not_in') {
       const terms = [...document.querySelectorAll<HTMLInputElement>('[data-term]')].filter(cb => cb.checked).map(cb => cb.dataset.term!);
       if (terms.length === 0) { _showError('Select at least one value.'); return null; }
@@ -1099,24 +1067,108 @@ export class FilterPanel {
   private _loadFields(index: string): void {
     if (this._fieldCache.has(index)) return;
     const features = this._getFeatures(index);
-    if (features.length === 0) { this._fieldCache.set(index, []); return; }
-    const props = features[0].properties ?? {};
-    const fields: FieldInfo[] = [];
-    for (const [name, val] of Object.entries(props)) {
-      if (name === '_id') continue;
-      const type = _inferType(name, val, features);
-      const info: FieldInfo = { name, type };
-      if (type === 'keyword') {
-        info.values = [...new Set(features.map(f => String(f.properties?.[name] ?? '')).filter(Boolean))].slice(0, 50);
+    if (features.length > 0) {
+      // Loaded index — infer from feature data
+      const props = features[0].properties ?? {};
+      const fields: FieldInfo[] = [];
+      for (const [name, val] of Object.entries(props)) {
+        if (name === '_id') continue;
+        const type = _inferType(name, val, features);
+        const info: FieldInfo = { name, type };
+        if (type === 'keyword') {
+          info.values = [...new Set(features.map(f => String(f.properties?.[name] ?? '')).filter(Boolean))].slice(0, 50);
+        }
+        fields.push(info);
       }
-      fields.push(info);
+      this._fieldCache.set(index, fields);
+      return;
     }
-    this._fieldCache.set(index, fields);
+    // Unloaded index — fetch from ES mapping (async)
+    this._loadFieldsFromMapping(index);
+  }
+
+  /** Async field loading from ES mapping for unloaded indexes. */
+  private async _loadFieldsFromMapping(index: string): Promise<void> {
+    if (this._loadingMappingFor.has(index) || this._fieldCache.has(index)) return;
+    if (!this._apiClient) { this._fieldCache.set(index, []); return; }
+
+    this._loadingMappingFor.add(index);
+    try {
+      const mapping = await this._apiClient.getMapping(index);
+      const fields: FieldInfo[] = [];
+      for (const [name, info] of Object.entries(mapping)) {
+        if (name === '_id') continue;
+        const esType = info.type;
+        let type: ValueFieldType;
+        if (esType === 'integer' || esType === 'long' || esType === 'float' || esType === 'double' || esType === 'short' || esType === 'byte' || esType === 'half_float' || esType === 'scaled_float') {
+          type = 'number';
+        } else if (esType === 'keyword') {
+          type = 'keyword';
+        } else if (esType === 'date') {
+          type = 'date';
+        } else if (esType === 'geo_point' || esType === 'geo_shape') {
+          continue; // skip geo fields
+        } else {
+          type = 'text';
+        }
+        fields.push({ name, type });
+      }
+      this._fieldCache.set(index, fields);
+    } catch (err) {
+      console.warn(`[FilterPanel] Failed to load mapping for "${index}":`, err);
+      this._fieldCache.set(index, []);
+    } finally {
+      this._loadingMappingFor.delete(index);
+      this.render(); // Re-render now that fields are available
+    }
   }
 
   private _getFields(index: string): FieldInfo[] {
     if (!this._fieldCache.has(index)) this._loadFields(index);
     return this._fieldCache.get(index) ?? [];
+  }
+
+  /** Returns fields that exist in ALL given indexes (intersection). */
+  private _getCommonFields(indexes: string[]): FieldInfo[] {
+    if (indexes.length === 0) return [];
+    if (indexes.length === 1) return this._getFields(indexes[0]);
+
+    // Get field lists for each index
+    const allFieldLists = indexes.map(idx => this._getFields(idx));
+    if (allFieldLists.some(fl => fl.length === 0)) return [];
+
+    // Find common field names (intersection)
+    const firstNames = new Set(allFieldLists[0].map(f => f.name));
+    for (let i = 1; i < allFieldLists.length; i++) {
+      const names = new Set(allFieldLists[i].map(f => f.name));
+      for (const n of firstNames) {
+        if (!names.has(n)) firstNames.delete(n);
+      }
+    }
+
+    // Build result from first list, merging types (fallback to 'text' on conflict)
+    const result: FieldInfo[] = [];
+    for (const f of allFieldLists[0]) {
+      if (!firstNames.has(f.name)) continue;
+      let type = f.type;
+      // Check type consistency across all indexes
+      for (let i = 1; i < allFieldLists.length; i++) {
+        const other = allFieldLists[i].find(of => of.name === f.name);
+        if (other && other.type !== type) { type = 'text'; break; }
+      }
+      // Merge keyword values from all indexes (if keyword)
+      let values: string[] | undefined;
+      if (type === 'keyword') {
+        const merged = new Set<string>();
+        for (const fl of allFieldLists) {
+          const fi = fl.find(fld => fld.name === f.name);
+          if (fi?.values) fi.values.forEach(v => merged.add(v));
+        }
+        if (merged.size > 0) values = [...merged].sort().slice(0, 50);
+      }
+      result.push({ name: f.name, type, values });
+    }
+    return result;
   }
 
   private _readDomIntoForm(): void {
@@ -1137,7 +1189,11 @@ export class FilterPanel {
     const ta = get('time-after');  if (ta) this._form.timeAfter = ta;
     const tfrom = get('time-between-from'); if (tfrom) this._form.timeBetweenFrom = tfrom;
     const tto = get('time-between-to');    if (tto)   this._form.timeBetweenTo   = tto;
-    const vi = get('value-index'); if (vi) this._form.valueIndex = vi;
+    // valueIndexes are managed via checkboxes, read them from DOM
+    const vidxCbs = this._bodyEl.querySelectorAll<HTMLInputElement>('[data-vidx-cb]');
+    if (vidxCbs.length > 0) {
+      this._form.valueIndexes = Array.from(vidxCbs).filter(cb => cb.checked).map(cb => cb.dataset.vidxCb!);
+    }
     const vf = get('value-field'); if (vf) this._form.valueField = vf;
     const vo = get('value-op');    if (vo) this._form.valueOp = vo as ValueOp;
     const vv = get('value-input');    if (vv) this._form.valueInput = vv;

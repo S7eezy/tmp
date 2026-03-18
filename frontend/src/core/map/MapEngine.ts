@@ -336,6 +336,11 @@ export class MapEngine {
       .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
       .join('&');
     const sep = baseUrl.includes('?') ? '&' : '?';
-    return `${baseUrl}${sep}${qs}`;
+    // Restore the MapLibre bbox placeholder — it must appear as literal
+    // {bbox-epsg-3857} in the URL template, not percent-encoded.
+    return `${baseUrl}${sep}${qs}`.replace(
+      encodeURIComponent('{bbox-epsg-3857}'),
+      '{bbox-epsg-3857}',
+    );
   }
 }

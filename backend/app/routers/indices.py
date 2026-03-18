@@ -69,12 +69,55 @@ async def detect_geo_fields(
         raise HTTPException(404, f"Index '{index}' not found")
     first = next(iter(resp.values()), {})
     props: dict[str, Any] = first.get("mappings", {}).get("properties", {})
+
+    # 1. Fields explicitly mapped as geo_point / geo_shape
     geo_fields = [
         name
         for name, meta in props.items()
         if meta.get("type") in ("geo_point", "geo_shape")
     ]
+
+    # 2. If none found, probe object-typed fields that may contain GeoJSON
+    #    (common when data is ingested without explicit geo mapping)
+    if not geo_fields:
+        candidate_names = _geo_field_candidates(props)
+        if candidate_names:
+            try:
+                sample = await es.search(index=index, query={"match_all": {}}, size=1)
+                hits = sample["hits"]["hits"]
+                if hits:
+                    src = hits[0]["_source"]
+                    for name in candidate_names:
+                        val = src.get(name)
+                        if val is not None and _classify_geo(val) is not None:
+                            geo_fields.append(name)
+            except Exception:
+                pass  # Sampling failed — return empty
+
     return GeoFieldsResponse(geoFields=geo_fields)
+
+
+def _geo_field_candidates(props: dict[str, Any]) -> list[str]:
+    """Return field names that look like they might contain geo data.
+
+    Matches by: mapping type (object with coordinates sub-field),
+    or common geo field names.
+    """
+    GEO_NAMES = {"geometry", "location", "geo", "position", "coordinates", "geom",
+                 "geo_point", "geopoint", "the_geom", "geolocation", "latlon", "latlng"}
+    candidates: list[str] = []
+    for name, meta in props.items():
+        # Object field that has a "coordinates" sub-property → likely GeoJSON
+        sub_props = meta.get("properties", {})
+        if "coordinates" in sub_props:
+            candidates.append(name)
+            continue
+        # Well-known geo field names stored as object/keyword/etc.
+        if name.lower() in GEO_NAMES and meta.get("type") not in (
+            "text", "keyword", "long", "integer", "float", "double", "boolean",
+        ):
+            candidates.append(name)
+    return candidates
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +154,15 @@ async def detect_geo_type(
 
 
 def _classify_geo(geo: Any) -> str | None:
-    """Determine simplified geo type from a single ES geo value."""
+    """Determine simplified geo type from a single ES geo value.
+
+    Handles all ES geo_point formats:
+      - {lat, lon}         → point
+      - GeoJSON dict       → mapped type
+      - [lon, lat]         → point
+      - [lon, lat, alt]    → point (3-D)
+      - "lat,lon" string   → point
+    """
     if isinstance(geo, dict):
         if "lat" in geo and "lon" in geo:
             return "point"
@@ -125,6 +176,17 @@ def _classify_geo(geo: Any) -> str | None:
             "MultiPolygon": "polygon",
         }
         return mapping.get(raw_type)
-    if isinstance(geo, list) and len(geo) == 2 and isinstance(geo[0], (int, float)):
+    # ES geo_point can be [lon, lat] or [lon, lat, alt]
+    if isinstance(geo, list) and len(geo) in (2, 3) and all(isinstance(v, (int, float)) for v in geo):
         return "point"
+    # ES geo_point as "lat,lon" string
+    if isinstance(geo, str) and "," in geo:
+        parts = geo.split(",")
+        if len(parts) == 2:
+            try:
+                float(parts[0])
+                float(parts[1])
+                return "point"
+            except ValueError:
+                pass
     return None

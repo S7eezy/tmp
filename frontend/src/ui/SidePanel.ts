@@ -85,6 +85,10 @@ export class SidePanel {
     return this._enabledIndexes;
   }
 
+  get activeStyleId(): string | null {
+    return this._activeStyleId;
+  }
+
   /** Feed index metadata from listIndices() for doc counts on unloaded rows. */
   setIndexMetadata(indices: EsIndexInfo[]): void {
     this._indexMetadata.clear();
@@ -117,10 +121,10 @@ export class SidePanel {
   // -- Render -------------------------------------------------------------
 
   render(): void {
-    this._renderLayers();
-    this._renderTiles();
     this._renderData();
     this._renderDataConfigButton();
+    this._renderLayers();
+    this._renderTiles();
   }
 
   // ── Layers (GeoServer WMS) ─────────────────────────────────────────────
@@ -341,7 +345,7 @@ export class SidePanel {
         row.append(toggle, iconWrap, label, meta);
       }
 
-      // Style + settings buttons only when loaded
+      // Style button — only when loaded (requires data to edit style)
       if (isLoaded) {
         const styleBtn = document.createElement('button');
         styleBtn.className = 'sp-row__gear';
@@ -351,7 +355,11 @@ export class SidePanel {
           e.stopPropagation();
           this._onOpenStyleEditor(sourceId);
         });
+        row.append(styleBtn);
+      }
 
+      // Settings gear — always available (timestamp field config works for unloaded indexes)
+      {
         const gear = document.createElement('button');
         gear.className = 'sp-row__gear';
         gear.title = 'Configure tooltip attributes';
@@ -360,9 +368,7 @@ export class SidePanel {
           e.stopPropagation();
           this._onOpenSettings(sourceId);
         });
-
-        // Append buttons after meta (or after warn+meta)
-        row.append(styleBtn, gear);
+        row.append(gear);
       }
 
       // Row click = toggle load/unload

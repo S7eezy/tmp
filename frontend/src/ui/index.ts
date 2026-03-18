@@ -15,3 +15,4 @@ export { geoIcon, tileIcon, svgIcon } from './icons';
 export { showToast } from './Toast';
 export type { ToastType } from './Toast';
 export { TimeModal } from './TimeModal';
+export { ViewsModal } from './ViewsModal';

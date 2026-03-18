@@ -79,7 +79,7 @@ export class DrawMode {
     const panel = this._getFilterPanel();
 
     if (this._mode === 'bbox' && this._points.length === 2) {
-      if (panel) panel.setBboxPoints(this._points[0], this._points[1]);
+      if (panel) panel.submitDrawnBbox(this._points[0], this._points[1]);
     } else if (this._mode === 'polygon') {
       const pts = this._points;
       // Remove trailing duplicate from double-click
@@ -88,7 +88,7 @@ export class DrawMode {
         const [bx, by] = pts[pts.length - 1];
         if (ax === bx && ay === by) pts.pop();
       }
-      if (pts.length >= 3 && panel) panel.setPolygonPoints([...pts]);
+      if (pts.length >= 3 && panel) panel.submitDrawnPolygon([...pts]);
     }
   }
 

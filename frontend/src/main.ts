@@ -15,7 +15,7 @@ import { DataStore, ApiClient, GeoServerClient, TileServerClient } from '@core/d
 import type { EsIndexInfo } from '@core/data';
 import { Config } from './config';
 import { FilterEngine, FilterPanel } from '@filters';
-import { Toolbar, SidePanel, SettingsModal, DataConfigModal, LayerStyleModal, FeatureTooltip, DrawMode, SearchPanel, Hud, showToast, TimeModal } from '@ui';
+import { Toolbar, SidePanel, SettingsModal, DataConfigModal, LayerStyleModal, FeatureTooltip, DrawMode, SearchPanel, Hud, showToast, TimeModal, ViewsModal } from '@ui';
 import type { Feature, FeatureCollection } from 'geojson';
 import type { GeoFilter } from '@filters';
 
@@ -163,7 +163,11 @@ async function boot(): Promise<void> {
     onTimestampFieldChange: (sourceId, field) => {
       filterEngine.setTimestampField(sourceId, field);
     },
+    apiClient,
   });
+  // Load saved index settings (timestamp field, attribute config) from backend
+  settingsModal.loadConfigs().catch(() => { /* ignore – config not yet saved */ });
+
   const hud           = new Hud(engine, dataStore);
   const toolbar       = new Toolbar(filterEngine);
 
@@ -273,6 +277,21 @@ async function boot(): Promise<void> {
   // Apply default time filter: last 30 minutes (immediately active from boot)
   timeModal.applyDefault();
 
+  // ── 9c. Views modal (toolbar) ────────────────────────────────────────────
+  const viewsModal = new ViewsModal({
+    filterEngine,
+    getViewExtraState: () => ({
+      enabledIndexes: [...sidePanel.enabledIndexes],
+      loadedIndexes: [...rawData.keys()],
+      layerVisibility: Object.fromEntries(
+        layerRegistry.all().map(l => [l.meta.id, l.meta.visible !== false]),
+      ),
+      activeMapStyle: sidePanel.activeStyleId ?? null,
+    }),
+  });
+  viewsModal.setup();
+  document.getElementById('tb-views')?.addEventListener('click', () => viewsModal.open());
+
   // ── 10. Filter panel ───────────────────────────────────────────────────
   var filterPanel = new FilterPanel({
     bodyEl: document.getElementById('fp-body')!,
@@ -282,6 +301,8 @@ async function boot(): Promise<void> {
     onStartDrawPolygon: () => drawMode.start('polygon'),
     onStartDrawBbox:    () => drawMode.start('bbox'),
     mapEngine: engine,
+    getEnabledIndexes: () => [...sidePanel.enabledIndexes],
+    apiClient,
   });
   filterPanel.render();
 
@@ -462,6 +483,62 @@ async function boot(): Promise<void> {
   filterEngine.addEventListener('views-change', () => {
     filterPanel.render();
   });
+
+  // ── View flush: unload all indexes + hide all layers ─────────────────
+  filterEngine.addEventListener('view-flush', () => {
+    // Unload every loaded index
+    for (const indexId of [...rawData.keys()]) {
+      unloadIndex(indexId);
+    }
+    // Hide all WMS / TileServer layers
+    for (const layer of layerRegistry.all()) {
+      if (layer.meta.visible) layerRegistry.setVisible(layer.meta.id, false);
+    }
+  });
+
+  // ── View apply: restore indexes + layers + tiles from saved view state ─
+  filterEngine.addEventListener('view-apply', ((e: Event) => {
+    const detail = (e as CustomEvent).detail as {
+      enabledIndexes: string[];
+      loadedIndexes: string[];
+      layerVisibility: Record<string, boolean>;
+      activeMapStyle: string | null;
+    };
+
+    // Restore enabled indexes
+    if (detail.enabledIndexes.length > 0) {
+      sidePanel.setEnabledIndexes(new Set(detail.enabledIndexes));
+    }
+
+    // Restore layer visibility (WMS / TileServer layers)
+    for (const [layerId, visible] of Object.entries(detail.layerVisibility)) {
+      const layer = layerRegistry.get(layerId);
+      if (layer) layerRegistry.setVisible(layerId, visible);
+    }
+
+    // Restore basemap style
+    if (detail.activeMapStyle && detail.activeMapStyle !== sidePanel.activeStyleId) {
+      const style = mapStyles.find(s => s.id === detail.activeMapStyle);
+      if (style) {
+        sidePanel.setMapStyles(mapStyles, style.id);
+        engine.map.setStyle(style.url);
+        engine.map.once('style.load', () => {
+          for (const layer of layerRegistry.all()) {
+            if (layer.meta.kind === 'maplibre' || layer.meta.kind === 'tileserver') {
+              (layer as WmsLayerAdapter | TileServerAdapter).attach(engine);
+            }
+          }
+        });
+      }
+    }
+
+    // Re-load data indexes that were loaded in the saved view
+    for (const indexId of detail.loadedIndexes) {
+      if (!rawData.has(indexId)) loadIndex(indexId);
+    }
+
+    sidePanel.render();
+  }) as EventListener);
 
   // Load saved views + saved filters from backend on boot
   filterEngine.loadFromBackend().then(() => {

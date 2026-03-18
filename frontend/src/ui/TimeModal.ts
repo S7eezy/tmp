@@ -1,9 +1,9 @@
 // ---------------------------------------------------------------------------
-// TimeModal – toolbar-attached modal for configuring the global time filter.
+// TimeModal – Elastic-inspired time picker for the toolbar.
 //
-// Two modes:
-//   - Relative: "Last N hours/days/months/years" or "Next N ..."
-//   - Absolute: custom from/to with DD-MM-YYYY hh:mm inputs
+// Two tabs:
+//   - Relative: "Last N <unit>" with a custom input + preset quick-select grid
+//   - Absolute: date-time from/to pickers
 //
 // Uses a fixed filter ID ('time-global') so there's always at most one
 // time filter active via this modal.
@@ -11,26 +11,50 @@
 
 import type { FilterEngine } from '@filters';
 import type { TimeFilter, TimeUnit } from '@filters';
-// newFilterId not needed – using fixed TIME_FILTER_ID
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 type Tab = 'relative' | 'absolute';
-type RelativeDir = 'last' | 'next';
 
-/** Extended time units including months/years (resolved to hours for ES). */
-type ExtUnit = 'hour' | 'day' | 'month' | 'year';
+/** Extended time units including months/years (resolved to days for ES). */
+type ExtUnit = 'second' | 'minute' | 'hour' | 'day' | 'month' | 'year';
 
-const UNIT_LABELS: Record<ExtUnit, string> = {
-  hour: 'Hours', day: 'Days', month: 'Months', year: 'Years',
-};
+const UNIT_OPTIONS: { value: ExtUnit; label: string }[] = [
+  { value: 'second', label: 'Seconds' },
+  { value: 'minute', label: 'Minutes' },
+  { value: 'hour',   label: 'Hours' },
+  { value: 'day',    label: 'Days' },
+  { value: 'month',  label: 'Months' },
+  { value: 'year',   label: 'Years' },
+];
 
-// UNIT_SHORT kept for reference but labels use _shortUnit() helper below
+/** Preset quick-select options (two columns) */
+const PRESETS: { amount: number; unit: ExtUnit; label: string }[][] = [
+  // Column 1
+  [
+    { amount: 1,  unit: 'year',  label: '1 year' },
+    { amount: 6,  unit: 'month', label: '6 months' },
+    { amount: 1,  unit: 'month', label: '1 month' },
+    { amount: 7,  unit: 'day',   label: '7 days' },
+  ],
+  // Column 2
+  [
+    { amount: 24, unit: 'hour',  label: '24 hours' },
+    { amount: 12, unit: 'hour',  label: '12 hours' },
+    { amount: 6,  unit: 'hour',  label: '6 hours' },
+    { amount: 1,  unit: 'hour',  label: '1 hour' },
+  ],
+];
 
 /** The fixed filter ID used for the toolbar time filter. */
 const TIME_FILTER_ID = 'time-global';
+
+// SVG icons (inline, 16×16)
+const ICON_CLOCK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>';
+const ICON_CALENDAR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>';
+const ICON_REFRESH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>';
 
 // ---------------------------------------------------------------------------
 // TimeModal
@@ -47,14 +71,14 @@ export class TimeModal {
 
   // Internal state
   private _tab: Tab = 'relative';
-  private _dir: RelativeDir = 'last';
   private _amount = 30;
   private _unit: ExtUnit = 'hour';
   private _absFrom = '';
   private _absTo = '';
 
-  // Label element ref
+  // DOM refs
   private _labelEl: HTMLElement | null = null;
+  private _popover: HTMLElement | null = null;
 
   constructor(opts: TimeModalOpts) {
     this._engine = opts.filterEngine;
@@ -63,25 +87,40 @@ export class TimeModal {
 
   // -- Public ---------------------------------------------------------------
 
-  /** Apply the default time filter (last 30 min) and update the toolbar label. */
+  /** Apply the default time filter (last 30 hours) and update the toolbar label. */
   applyDefault(): void {
     this._tab = 'relative';
-    this._dir = 'last';
     this._amount = 30;
     this._unit = 'hour';
     this._apply();
   }
 
-  /** Bind the toolbar button and label. Call once after DOM is ready. */
+  /** Bind the toolbar button. Call once after DOM is ready. */
   setup(): void {
     this._labelEl = document.getElementById('tb-time-label');
-    document.getElementById('tb-time')?.addEventListener('click', () => this.open());
+    const btn = document.getElementById('tb-time');
+    btn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this._toggle();
+    });
+
+    // Close popover on outside click
+    document.addEventListener('click', (e) => {
+      if (this._popover && !this._popover.contains(e.target as Node) &&
+          !(e.target as HTMLElement).closest('#tb-time')) {
+        this._close();
+      }
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this._popover) this._close();
+    });
   }
 
   /** Get the label string for the current time filter state. */
   getLabel(): string {
     const existing = this._engine.filters.find(f => f.id === TIME_FILTER_ID);
-    if (!existing) return 'No time filter';
+    if (!existing) return 'No filter';
     if (existing.kind !== 'time') return 'Custom';
     const tf = existing as TimeFilter;
     if (tf.mode === 'last') {
@@ -89,7 +128,13 @@ export class TimeModal {
       const u = tf.lastUnit ?? 'hour';
       return `Last ${n} ${_shortUnit(u, n)}`;
     }
-    if (tf.mode === 'after') return `Next ${this._amount} ${_shortUnit(this._unit as TimeUnit, this._amount)}`;
+    if (tf.mode === 'between' && tf.from && tf.to) {
+      // Check if it's a "relative future" filter
+      if (Math.abs(new Date(tf.from).getTime() - Date.now()) < 60_000) {
+        return `Next ${this._amount} ${_shortUnit(this._unit as TimeUnit, this._amount)}`;
+      }
+      return _formatRange(tf.from, tf.to);
+    }
     return 'Custom';
   }
 
@@ -97,55 +142,96 @@ export class TimeModal {
     if (this._labelEl) {
       const label = this.getLabel();
       this._labelEl.textContent = label;
-      this._labelEl.classList.toggle('toolbar__label--muted', label === 'No time filter');
+      this._labelEl.classList.toggle('toolbar__time-label--muted', label === 'No filter');
     }
   }
 
-  // -- Open / Close ---------------------------------------------------------
+  // -- Popover management ---------------------------------------------------
 
-  open(): void {
-    // Sync internal state from current filter (if exists)
+  private _toggle(): void {
+    if (this._popover) {
+      this._close();
+    } else {
+      this._open();
+    }
+  }
+
+  private _close(): void {
+    if (this._popover) {
+      this._popover.remove();
+      this._popover = null;
+    }
+    document.getElementById('tb-time')?.classList.remove('toolbar__btn--active');
+  }
+
+  private _open(): void {
+    this._close();
     this._syncFromEngine();
 
-    const overlay = document.getElementById('settings-overlay')!;
-    const titleEl = document.getElementById('settings-title')!;
-    const bodyEl = document.getElementById('settings-body')!;
+    const btn = document.getElementById('tb-time')!;
+    btn.classList.add('toolbar__btn--active');
+    const rect = btn.getBoundingClientRect();
 
-    titleEl.textContent = 'Time Filter';
-    bodyEl.innerHTML = '';
+    const popover = document.createElement('div');
+    popover.className = 'tm-popover';
+    // Position below the button, right-aligned
+    popover.style.top = `${rect.bottom + 8}px`;
+    popover.style.right = `${window.innerWidth - rect.right}px`;
 
-    const root = document.createElement('div');
-    root.className = 'tm-root';
+    this._buildContent(popover);
+    document.body.appendChild(popover);
+    this._popover = popover;
+
+    // Animate in
+    requestAnimationFrame(() => popover.classList.add('tm-popover--visible'));
+  }
+
+  // -- Build UI -------------------------------------------------------------
+
+  private _buildContent(container: HTMLElement): void {
+    container.innerHTML = '';
+
+    // ── Header ──────────────────────────────────────────────────
+    const header = document.createElement('div');
+    header.className = 'tm-header';
+    const title = document.createElement('span');
+    title.className = 'tm-header__title';
+    title.innerHTML = `${ICON_CLOCK} Time range`;
+    header.appendChild(title);
+    container.appendChild(header);
 
     // ── Tab bar ────────────────────────────────────────────────
     const tabBar = document.createElement('div');
     tabBar.className = 'tm-tabs';
 
-    const mkTab = (tab: Tab, label: string) => {
-      const btn = document.createElement('button');
-      btn.className = 'tm-tab' + (this._tab === tab ? ' tm-tab--active' : '');
-      btn.textContent = label;
-      btn.addEventListener('click', () => {
-        this._tab = tab;
-        this._renderBody(content);
-        tabBar.querySelectorAll('.tm-tab').forEach((el, i) => {
-          el.classList.toggle('tm-tab--active', i === (tab === 'relative' ? 0 : 1));
-        });
-      });
-      return btn;
-    };
-    tabBar.append(mkTab('relative', 'Relative'), mkTab('absolute', 'Absolute'));
-    root.appendChild(tabBar);
+    const tabs: { id: Tab; label: string; icon: string }[] = [
+      { id: 'relative', label: 'Relative', icon: ICON_REFRESH },
+      { id: 'absolute', label: 'Absolute', icon: ICON_CALENDAR },
+    ];
 
-    // ── Content ────────────────────────────────────────────────
+    for (const t of tabs) {
+      const tab = document.createElement('button');
+      tab.className = 'tm-tab' + (this._tab === t.id ? ' tm-tab--active' : '');
+      tab.innerHTML = `${t.icon}<span>${t.label}</span>`;
+      tab.addEventListener('click', (e) => {
+        e.stopPropagation();         // prevent outside-click handler from closing popover
+        this._tab = t.id;
+        this._buildContent(container);
+      });
+      tabBar.appendChild(tab);
+    }
+    container.appendChild(tabBar);
+
+    // ── Content ─────────────────────────────────────────────────
     const content = document.createElement('div');
     content.className = 'tm-content';
-    this._renderBody(content);
-    root.appendChild(content);
+    if (this._tab === 'relative') this._buildRelative(content);
+    else this._buildAbsolute(content);
+    container.appendChild(content);
 
-    // ── Actions ────────────────────────────────────────────────
-    const actions = document.createElement('div');
-    actions.className = 'tm-actions';
+    // ── Footer ─────────────────────────────────────────────────
+    const footer = document.createElement('div');
+    footer.className = 'tm-footer';
 
     const clearBtn = document.createElement('button');
     clearBtn.className = 'tm-btn tm-btn--ghost';
@@ -154,95 +240,98 @@ export class TimeModal {
       this._engine.remove(TIME_FILTER_ID);
       this.updateLabel();
       this._onApply();
-      overlay.style.display = 'none';
+      this._close();
     });
 
     const applyBtn = document.createElement('button');
     applyBtn.className = 'tm-btn tm-btn--primary';
-    applyBtn.textContent = 'Apply';
+    applyBtn.innerHTML = 'Apply';
     applyBtn.addEventListener('click', () => {
       this._readInputs(content);
       this._apply();
-      overlay.style.display = 'none';
+      this._close();
     });
 
-    actions.append(clearBtn, applyBtn);
-    root.appendChild(actions);
-
-    bodyEl.appendChild(root);
-    overlay.style.display = 'flex';
-
-    // Close handlers
-    document.getElementById('settings-close')!.onclick = () => { overlay.style.display = 'none'; };
-    overlay.onclick = (e) => { if (e.target === overlay) overlay.style.display = 'none'; };
+    footer.append(clearBtn, applyBtn);
+    container.appendChild(footer);
   }
 
-  // -- Render helpers -------------------------------------------------------
+  // -- Relative tab ---------------------------------------------------------
 
-  private _renderBody(container: HTMLElement): void {
-    container.innerHTML = '';
-    if (this._tab === 'relative') this._renderRelative(container);
-    else this._renderAbsolute(container);
-  }
+  private _buildRelative(container: HTMLElement): void {
+    // ── Custom input row ──────────────────────────────────────
+    const customSection = document.createElement('div');
+    customSection.className = 'tm-custom-row';
 
-  private _renderRelative(container: HTMLElement): void {
-    // Direction: Last / Next
-    const dirRow = document.createElement('div');
-    dirRow.className = 'tm-dir-row';
-
-    for (const dir of ['last', 'next'] as RelativeDir[]) {
-      const btn = document.createElement('button');
-      btn.className = 'tm-dir-btn' + (this._dir === dir ? ' tm-dir-btn--active' : '');
-      btn.textContent = dir === 'last' ? 'Last' : 'Next';
-      btn.addEventListener('click', () => {
-        this._dir = dir;
-        dirRow.querySelectorAll('.tm-dir-btn').forEach(el =>
-          el.classList.toggle('tm-dir-btn--active', el === btn),
-        );
-      });
-      dirRow.appendChild(btn);
-    }
-    container.appendChild(dirRow);
-
-    // Amount input + unit buttons
-    const inputRow = document.createElement('div');
-    inputRow.className = 'tm-input-row';
+    const label = document.createElement('span');
+    label.className = 'tm-custom-label';
+    label.textContent = 'Last';
 
     const amountInput = document.createElement('input');
     amountInput.type = 'number';
-    amountInput.className = 'tm-amount fp-input';
+    amountInput.className = 'tm-input';
     amountInput.id = 'tm-amount';
     amountInput.value = String(this._amount);
     amountInput.min = '1';
-    inputRow.appendChild(amountInput);
 
-    const unitGroup = document.createElement('div');
-    unitGroup.className = 'tm-unit-group';
-    for (const unit of ['hour', 'day', 'month', 'year'] as ExtUnit[]) {
-      const btn = document.createElement('button');
-      btn.className = 'tm-unit-btn' + (this._unit === unit ? ' tm-unit-btn--active' : '');
-      btn.textContent = UNIT_LABELS[unit];
-      btn.addEventListener('click', () => {
-        this._unit = unit;
-        unitGroup.querySelectorAll('.tm-unit-btn').forEach(el =>
-          el.classList.toggle('tm-unit-btn--active', el === btn),
-        );
-      });
-      unitGroup.appendChild(btn);
+    const unitSelect = document.createElement('select');
+    unitSelect.className = 'tm-select';
+    unitSelect.id = 'tm-unit';
+    for (const opt of UNIT_OPTIONS) {
+      const option = document.createElement('option');
+      option.value = opt.value;
+      option.textContent = opt.label;
+      if (opt.value === this._unit) option.selected = true;
+      unitSelect.appendChild(option);
     }
-    inputRow.appendChild(unitGroup);
-    container.appendChild(inputRow);
+
+    customSection.append(label, amountInput, unitSelect);
+    container.appendChild(customSection);
+
+    // ── Separator ──────────────────────────────────────────────
+    const sep = document.createElement('div');
+    sep.className = 'tm-separator';
+    const sepLabel = document.createElement('span');
+    sepLabel.className = 'tm-separator__text';
+    sepLabel.textContent = 'Quick select';
+    sep.appendChild(sepLabel);
+    container.appendChild(sep);
+
+    // ── Preset grid (2 columns) ───────────────────────────────
+    const grid = document.createElement('div');
+    grid.className = 'tm-presets';
+
+    for (const col of PRESETS) {
+      const colEl = document.createElement('div');
+      colEl.className = 'tm-presets__col';
+      for (const preset of col) {
+        const btn = document.createElement('button');
+        btn.className = 'tm-preset';
+        const isActive = this._amount === preset.amount && this._unit === preset.unit;
+        if (isActive) btn.classList.add('tm-preset--active');
+        btn.textContent = preset.label;
+        btn.addEventListener('click', () => {
+          this._amount = preset.amount;
+          this._unit = preset.unit;
+          this._apply();
+          this._close();
+        });
+        colEl.appendChild(btn);
+      }
+      grid.appendChild(colEl);
+    }
+    container.appendChild(grid);
   }
 
-  private _renderAbsolute(container: HTMLElement): void {
-    // Auto-fill defaults if empty
+  // -- Absolute tab ---------------------------------------------------------
+
+  private _buildAbsolute(container: HTMLElement): void {
     if (!this._absFrom) {
       const yesterday = new Date(Date.now() - 86_400_000);
       this._absFrom = _toDateTimeLocal(yesterday);
     }
     if (!this._absTo) {
-      const tomorrow = new Date(Date.now() + 86_400_000);
-      this._absTo = _toDateTimeLocal(tomorrow);
+      this._absTo = _toDateTimeLocal(new Date());
     }
 
     const fromField = this._makeDateField('From', 'tm-abs-from', this._absFrom);
@@ -252,16 +341,16 @@ export class TimeModal {
 
   private _makeDateField(label: string, id: string, value: string): HTMLElement {
     const wrap = document.createElement('div');
-    wrap.className = 'tm-field';
+    wrap.className = 'tm-date-field';
 
     const lbl = document.createElement('label');
-    lbl.className = 'tm-field-label';
+    lbl.className = 'tm-date-field__label';
     lbl.textContent = label;
     lbl.htmlFor = id;
 
     const input = document.createElement('input');
     input.type = 'datetime-local';
-    input.className = 'fp-input tm-date-input';
+    input.className = 'tm-input tm-input--date';
     input.id = id;
     input.value = value;
 
@@ -274,7 +363,9 @@ export class TimeModal {
   private _readInputs(container: HTMLElement): void {
     if (this._tab === 'relative') {
       const amountEl = container.querySelector('#tm-amount') as HTMLInputElement | null;
+      const unitEl = container.querySelector('#tm-unit') as HTMLSelectElement | null;
       if (amountEl) this._amount = Math.max(1, parseInt(amountEl.value, 10) || 1);
+      if (unitEl) this._unit = unitEl.value as ExtUnit;
     } else {
       const fromEl = container.querySelector('#tm-abs-from') as HTMLInputElement | null;
       const toEl = container.querySelector('#tm-abs-to') as HTMLInputElement | null;
@@ -286,52 +377,31 @@ export class TimeModal {
   // -- Apply filter ---------------------------------------------------------
 
   private _apply(): void {
-    // Remove existing time filter
     this._engine.remove(TIME_FILTER_ID);
 
     let filter: TimeFilter;
 
     if (this._tab === 'relative') {
-      if (this._dir === 'last') {
-        // Convert months/years to the equivalent in smaller units for ES
-        const { amount, unit } = _resolveUnit(this._amount, this._unit);
-        const label = `Last ${this._amount} ${_shortUnit(this._unit as TimeUnit, this._amount)}`;
-        filter = {
-          id: TIME_FILTER_ID,
-          kind: 'time',
-          label,
-          enabled: true,
-          scope: ['*'],
-          field: 'timestamp',
-          mode: 'last',
-          lastAmount: amount,
-          lastUnit: unit,
-        };
-      } else {
-        // "Next" → from: now, to: now + duration
-        const ms = _unitToMs(this._amount, this._unit);
-        const to = new Date(Date.now() + ms).toISOString();
-        const label = `Next ${this._amount} ${_shortUnit(this._unit as TimeUnit, this._amount)}`;
-        filter = {
-          id: TIME_FILTER_ID,
-          kind: 'time',
-          label,
-          enabled: true,
-          scope: ['*'],
-          field: 'timestamp',
-          mode: 'between',
-          from: new Date().toISOString(),
-          to,
-        };
-      }
+      const { amount, unit } = _resolveUnit(this._amount, this._unit);
+      const label = `Last ${this._amount} ${_shortUnit(this._unit as TimeUnit, this._amount)}`;
+      filter = {
+        id: TIME_FILTER_ID,
+        kind: 'time',
+        label,
+        enabled: true,
+        scope: ['*'],
+        field: 'timestamp',
+        mode: 'last',
+        lastAmount: amount,
+        lastUnit: unit,
+      };
     } else {
-      // Absolute mode
       const from = this._absFrom ? new Date(this._absFrom).toISOString() : undefined;
       const to = this._absTo ? new Date(this._absTo).toISOString() : undefined;
       filter = {
         id: TIME_FILTER_ID,
         kind: 'time',
-        label: 'Custom',
+        label: _formatRange(from, to),
         enabled: true,
         scope: ['*'],
         field: 'timestamp',
@@ -355,20 +425,12 @@ export class TimeModal {
 
     if (tf.mode === 'last') {
       this._tab = 'relative';
-      this._dir = 'last';
       this._amount = tf.lastAmount ?? 30;
-      // Map back from ES unit to ExtUnit
       this._unit = (tf.lastUnit ?? 'hour') as ExtUnit;
     } else if (tf.mode === 'between') {
-      // Check if it looks like a "next" filter (from ≈ now)
-      if (tf.from && Math.abs(new Date(tf.from).getTime() - Date.now()) < 60_000) {
-        this._tab = 'relative';
-        this._dir = 'next';
-      } else {
-        this._tab = 'absolute';
-        this._absFrom = tf.from ? _toDateTimeLocal(new Date(tf.from)) : '';
-        this._absTo = tf.to ? _toDateTimeLocal(new Date(tf.to)) : '';
-      }
+      this._tab = 'absolute';
+      this._absFrom = tf.from ? _toDateTimeLocal(new Date(tf.from)) : '';
+      this._absTo = tf.to ? _toDateTimeLocal(new Date(tf.to)) : '';
     }
   }
 }
@@ -377,46 +439,42 @@ export class TimeModal {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Convert a Date to `YYYY-MM-DDThh:mm` for datetime-local inputs. */
 function _toDateTimeLocal(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-/** Short unit label for the toolbar (e.g. "30 min", "2 days"). */
 function _shortUnit(unit: TimeUnit | string, n: number): string {
   const map: Record<string, string> = {
+    second: n === 1 ? 'sec' : 'sec',
+    minute: n === 1 ? 'min' : 'min',
     hour: n === 1 ? 'hour' : 'hours',
     day: n === 1 ? 'day' : 'days',
     month: n === 1 ? 'month' : 'months',
     year: n === 1 ? 'year' : 'years',
-    minute: n === 1 ? 'min' : 'min',
     week: n === 1 ? 'week' : 'weeks',
   };
   return map[unit] ?? unit;
 }
 
-/**
- * Resolve months/years to days (ES `now-Xd` syntax doesn't support months/years
- * directly). Hours and days pass through unchanged.
- */
-function _resolveUnit(amount: number, unit: ExtUnit): { amount: number; unit: TimeUnit } {
-  switch (unit) {
-    case 'hour':  return { amount, unit: 'hour' };
-    case 'day':   return { amount, unit: 'day' };
-    case 'month': return { amount: amount * 30, unit: 'day' };
-    case 'year':  return { amount: amount * 365, unit: 'day' };
-  }
+function _formatRange(from?: string, to?: string): string {
+  if (!from && !to) return 'Custom';
+  const fmtDate = (iso: string) => {
+    const d = new Date(iso);
+    return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  };
+  if (from && to) return `${fmtDate(from)} → ${fmtDate(to)}`;
+  if (from) return `After ${fmtDate(from)}`;
+  return `Before ${fmtDate(to!)}`;
 }
 
-/** Convert amount + unit to milliseconds. */
-function _unitToMs(amount: number, unit: ExtUnit): number {
-  const MS_HOUR  = 3_600_000;
-  const MS_DAY   = 86_400_000;
+function _resolveUnit(amount: number, unit: ExtUnit): { amount: number; unit: TimeUnit } {
   switch (unit) {
-    case 'hour':  return amount * MS_HOUR;
-    case 'day':   return amount * MS_DAY;
-    case 'month': return amount * 30 * MS_DAY;
-    case 'year':  return amount * 365 * MS_DAY;
+    case 'second': return { amount: amount, unit: 'minute' }; // ES minimum
+    case 'minute': return { amount, unit: 'minute' };
+    case 'hour':   return { amount, unit: 'hour' };
+    case 'day':    return { amount, unit: 'day' };
+    case 'month':  return { amount: amount * 30, unit: 'day' };
+    case 'year':   return { amount: amount * 365, unit: 'day' };
   }
 }

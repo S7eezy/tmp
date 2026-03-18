@@ -5,7 +5,7 @@
 import type { MapEngine } from '@core/map';
 import type { DataStore } from '@core/data';
 import type { SettingsModal } from './SettingsModal';
-import type { Feature } from 'geojson';
+import type { Feature, FeatureCollection } from 'geojson';
 
 export interface PinnedTooltip {
   x: number;
@@ -13,6 +13,11 @@ export interface PinnedTooltip {
   feature: Feature;
   sourceId: string;
 }
+
+const HIGHLIGHT_SOURCE = 'ft-highlight-source';
+const HIGHLIGHT_FILL   = 'ft-highlight-fill';
+const HIGHLIGHT_LINE   = 'ft-highlight-line';
+const HIGHLIGHT_CIRCLE = 'ft-highlight-circle';
 
 export class FeatureTooltip {
   private _pinned: PinnedTooltip | null = null;
@@ -120,6 +125,7 @@ export class FeatureTooltip {
       } else {
         this._pinned = null;
         this._tooltipEl.classList.remove('visible');
+        this._clearHighlight();
       }
     });
 
@@ -127,6 +133,7 @@ export class FeatureTooltip {
       if (e.key === 'Escape' && this._pinned) {
         this._pinned = null;
         this._tooltipEl.classList.remove('visible');
+        this._clearHighlight();
       }
     });
   }
@@ -141,6 +148,7 @@ export class FeatureTooltip {
   dismiss(): void {
     this._pinned = null;
     this._tooltipEl.classList.remove('visible');
+    this._clearHighlight();
   }
 
   private _show(info: PinnedTooltip): void {
@@ -176,6 +184,7 @@ export class FeatureTooltip {
     closeBtn.addEventListener('click', () => {
       this._pinned = null;
       el.classList.remove('visible');
+      this._clearHighlight();
     });
     header.appendChild(closeBtn);
     el.appendChild(header);
@@ -214,6 +223,78 @@ export class FeatureTooltip {
     el.style.left = `${Math.min(info.x + 12, window.innerWidth - 300)}px`;
     el.style.top = `${Math.min(info.y - 10, window.innerHeight - 250)}px`;
     el.classList.add('visible');
+
+    // Highlight the selected feature on the map
+    this._setHighlight(feature);
+  }
+
+  // -- Map highlight (yellow outline) --------------------------------------
+
+  private _setHighlight(feature: Feature): void {
+    const map = this._engine.map;
+    if (!map.isStyleLoaded()) return;
+
+    const fc: FeatureCollection = {
+      type: 'FeatureCollection',
+      features: [feature],
+    };
+
+    const src = map.getSource(HIGHLIGHT_SOURCE);
+    if (src && 'setData' in src) {
+      (src as { setData: (data: FeatureCollection) => void }).setData(fc);
+    } else {
+      map.addSource(HIGHLIGHT_SOURCE, { type: 'geojson', data: fc });
+
+      // Circle layer for Point geometries
+      map.addLayer({
+        id: HIGHLIGHT_CIRCLE,
+        type: 'circle',
+        source: HIGHLIGHT_SOURCE,
+        filter: ['==', ['geometry-type'], 'Point'],
+        paint: {
+          'circle-radius': 10,
+          'circle-color': 'transparent',
+          'circle-stroke-color': '#facc15',
+          'circle-stroke-width': 3,
+        },
+      });
+
+      // Line layer for Line / Polygon outlines
+      map.addLayer({
+        id: HIGHLIGHT_LINE,
+        type: 'line',
+        source: HIGHLIGHT_SOURCE,
+        paint: {
+          'line-color': '#facc15',
+          'line-width': 3,
+          'line-opacity': 0.9,
+        },
+      });
+
+      // Fill layer for Polygon (subtle)
+      map.addLayer({
+        id: HIGHLIGHT_FILL,
+        type: 'fill',
+        source: HIGHLIGHT_SOURCE,
+        filter: ['==', ['geometry-type'], 'Polygon'],
+        paint: {
+          'fill-color': '#facc15',
+          'fill-opacity': 0.1,
+        },
+      });
+    }
+  }
+
+  private _clearHighlight(): void {
+    const map = this._engine.map;
+    if (!map.isStyleLoaded()) return;
+    const src = map.getSource(HIGHLIGHT_SOURCE);
+    if (src && 'setData' in src) {
+      (src as { setData: (data: FeatureCollection) => void }).setData({
+        type: 'FeatureCollection',
+        features: [],
+      });
+    }
   }
 }
 
